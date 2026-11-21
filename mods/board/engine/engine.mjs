@@ -700,7 +700,7 @@ export function depBranchOf(t, all) {
 export async function depRef(top, branch) {
   const has = async (ref) => (await git(top, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).ok;
   const remote = (await git(top, ["remote", "get-url", "origin"])).ok;
-  if (remote) await run("git", ["-C", top, "fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { timeout: 120000 });
+  if (remote) await run("git", ["-C", top, "fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { timeout: 120000 });
   const pushed = remote && await has(`refs/remotes/origin/${branch}`) ? `origin/${branch}` : null;
   const local = await has(`refs/heads/${branch}`) ? branch : null;
   if (pushed && local) {
