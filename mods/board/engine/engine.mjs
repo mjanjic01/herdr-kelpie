@@ -29,6 +29,7 @@ import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
 import crypto from "node:crypto";
+import * as PF from "./platform.mjs"; // what differs on Linux (LINUX.md)
 
 export const PROTOCOL = 2;
 
@@ -164,7 +165,7 @@ export const secretAccount = (teamId, memberId, name) => `${teamId}/${memberId}/
 // macOS caps socket paths near 104 bytes: a long home gets a short one in ~/.herdr/run.
 const SOCK = () => {
   const own = P("secrets.sock");
-  if (Buffer.byteLength(own) < 100) return own;
+  if (Buffer.byteLength(own) < PF.SOCK_MAX) return own; // Linux: 108 bytes
   const dir = path.join(os.homedir(), ".herdr", "run");
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return path.join(dir, `${crypto.createHash("sha1").update(HOME).digest("hex").slice(0, 12)}.sock`);
@@ -198,22 +199,26 @@ export const securityLine = (account, value) =>
   `add-generic-password -U -s ${SECRET_SERVICE} -a "${account}" -w "${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"\n`;
 const checkAccount = (a) => { if (!ACCOUNT.test(String(a ?? ""))) throw new Error("Bad secret account."); return String(a); };
 async function secretGet(account) {
+  if (PF.LINUX) return PF.secretGet(SECRET_SERVICE, checkAccount(account)); // Linux: secret-tool
   const r = await security(["find-generic-password", "-s", SECRET_SERVICE, "-a", checkAccount(account), "-g"]);
   return r.code === 0 ? decodePassword(r.err) : null;
 }
 async function secretHas(account) {
+  if (PF.LINUX) return PF.secretHas(SECRET_SERVICE, checkAccount(account)); // Linux: secret-tool
   return (await security(["find-generic-password", "-s", SECRET_SERVICE, "-a", checkAccount(account)])).code === 0;
 }
 async function secretSet(account, value) {
   value = String(value ?? "");
   if (!value) throw new Error("The value is empty.");
   if (/[\r\n]/.test(value)) throw new Error("A secret must be one line.");
+  if (PF.LINUX) return PF.secretSet(SECRET_SERVICE, checkAccount(account), value); // Linux: secret-tool
   const r = await security(["-i"], securityLine(checkAccount(account), value));
   if (/-60008|-25308|Unable to obtain authorization|User interaction is not allowed/i.test(r.err))
     throw new Error(`This Mac's screen is locked, and macOS stores new Keychain entries only while someone is signed in at it. Unlock it (at the machine or over Screen Sharing), then set the secret again. Stored secrets keep working while it is locked.`);
   if (r.code !== 0 || /returned -?\d+|error/i.test(r.err)) throw new Error(`The Keychain refused it: ${r.err.trim().split("\n").pop()}`);
 }
 async function secretDelete(account) {
+  if (PF.LINUX) return PF.secretDelete(SECRET_SERVICE, checkAccount(account)); // Linux: secret-tool
   await security(["delete-generic-password", "-s", SECRET_SERVICE, "-a", checkAccount(account)]);
 }
 // Values of members that are gone, or names a member no longer has.
@@ -529,7 +534,7 @@ export const DEFAULT_ENV_NOTES = [
   "- Before you write your result, run `agent-browser close` if you used it, and close the pages that you opened through your browser tools. The board also closes your browsers after your result.",
   "- Never open links, files or artifacts in a desktop app on this machine (Safari, Preview, `open <url>`). Use only your own Chrome through the browser tools.",
   "- Run any browser, e2e or Playwright suite through `\"$BOARD_HEAVY\"` (the board's `board-heavy`) with `--workers=$BOARD_WORKERS` (the board's \"Browsers per test run\": how many browsers one run may open at once), for example `\"$BOARD_HEAVY\" npm run test:acceptance -- --workers=$BOARD_WORKERS`. It waits for this machine's browser slot, so suites never run side by side, and runs at low priority.",
-].join("\n");
+].map((l) => PF.envNote(l, SHELL)).join("\n"); // Linux: the shell and opener of this machine
 const DEFAULT_BOARD = { pickup: false, worktrees: true, setup: "", envNotes: DEFAULT_ENV_NOTES, standing: "", workers: 4 };
 
 let tasks = [];
@@ -678,6 +683,33 @@ async function baseRef(top) {
   return head;
 }
 const branchOf = async (folder) => (await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"])).out || null;
+const taskBranch = (t) => `board/${slugOf(t.title) || "task"}-${t.id.slice(-5)}`;
+// A task with exactly one dependency builds on that task's work: it branches
+// from the dependency's branch, not from the default branch (else its PR
+// carries the dependency's commits and newer default-branch ones twice).
+// The branch name: the one its worktree has, else the name the engine gives it.
+export function depBranchOf(t, all) {
+  const ids = t?.dependsOn ?? [];
+  if (ids.length !== 1) return null;
+  const d = all.find((x) => x.id === ids[0] && x.board === t.board);
+  return d ? (d.worktree?.branch ?? taskBranch(d)) : null;
+}
+// The ref a dependent task branches from: the dependency's pushed branch, or
+// its local one when that is ahead of (or without) the pushed one; null when
+// neither exists.
+export async function depRef(top, branch) {
+  const has = async (ref) => (await git(top, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).ok;
+  const remote = (await git(top, ["remote", "get-url", "origin"])).ok;
+  if (remote) await run("git", ["-C", top, "fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { timeout: 120000 });
+  const pushed = remote && await has(`refs/remotes/origin/${branch}`) ? `origin/${branch}` : null;
+  const local = await has(`refs/heads/${branch}`) ? branch : null;
+  if (pushed && local) {
+    const same = (await git(top, ["rev-parse", pushed])).out === (await git(top, ["rev-parse", local])).out;
+    const ahead = !same && (await git(top, ["merge-base", "--is-ancestor", pushed, local])).ok;
+    return ahead ? local : pushed;
+  }
+  return pushed ?? local;
+}
 
 // The task's worktree: the one it has, or a new one for a task's first run.
 // null: it works in the board's folder (setting off, not git, or it already ran there).
@@ -689,10 +721,13 @@ async function worktreeFor(t, folder) {
   if (!boardSet(t).worktrees || !folder || (t.runs ?? []).length) return null;
   const repo = await repoOf(folder);
   if (!repo) return null;
-  const branch = `board/${slugOf(t.title) || "task"}-${t.id.slice(-5)}`;
+  const branch = taskBranch(t);
   const wpath = `${WT_ROOT}/${repo.name}/${branch.replace(/\//g, "-")}`;
   const exists = (await git(repo.top, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).ok;
-  const base = exists ? branch : await baseRef(repo.top);
+  const dep = exists ? null : depBranchOf(t, tasks);
+  const fromDep = dep ? await depRef(repo.top, dep) : null;
+  if (dep && !fromDep) log("dependency branch", dep, "not found in", repo.top, "; branching from the default branch");
+  const base = exists ? branch : fromDep ?? await baseRef(repo.top);
   const r = await git(repo.top, exists ? ["worktree", "add", wpath, branch] : ["worktree", "add", "--no-track", "-b", branch, wpath, base]);
   if (!r.ok) throw new Error(`Could not make a worktree for the task: ${r.err || "git worktree add failed"}`);
   return { path: wpath, branch, base, repo: repo.top, fresh: !exists };
@@ -1138,9 +1173,11 @@ function writeMachine(n) {
 async function checkLoad() {
   if (Date.now() - lastLoadCheck < 10000) return;
   lastLoadCheck = Date.now();
-  const r = await run("sysctl", ["-n", "kern.memorystatus_vm_pressure_level", "vm.swapusage", "vm.loadavg", "hw.ncpu"], { timeout: 5000 });
-  if (r.code !== 0 && !r.stdout) return;
-  const n = parseLoad(r.stdout);
+  // Linux: /proc (platform.mjs); macOS: these sysctl keys.
+  const r = PF.LINUX ? null : await run("sysctl", ["-n", "kern.memorystatus_vm_pressure_level", "vm.swapusage", "vm.loadavg", "hw.ncpu"], { timeout: 5000 });
+  if (r && r.code !== 0 && !r.stdout) return;
+  const n = r ? parseLoad(r.stdout) : PF.linuxLoad();
+  if (!n) return;
   const v = loadVerdict(n, settings);
   if (v) {
     if (!loadGate || loadGate.why !== v.why || loadGate.calm) { if (!loadGate) log("load gate on:", v.detail); loadGate = { why: v.why, detail: v.detail, since: loadGate?.since ?? Date.now(), calm: 0 }; dirty = true; }
@@ -1345,7 +1382,8 @@ export function chromesBelow(pid, rows) {
   const stack = [...(kids.get(pid) ?? [])];
   while (stack.length) {
     const x = stack.pop();
-    if (/\/(Google Chrome|Chromium|Google Chrome for Testing)\.app\/Contents\/MacOS\/[^/]+$|\/chrome-headless-shell(\s|$)/.test(x.command.split(" --")[0]) && !/--type=/.test(x.command)) out.push(x.pid);
+    // Linux: also the Linux Chrome paths (platform.mjs).
+    if ((/\/(Google Chrome|Chromium|Google Chrome for Testing)\.app\/Contents\/MacOS\/[^/]+$|\/chrome-headless-shell(\s|$)/.test(x.command.split(" --")[0]) || PF.isLinuxChromeMain(x.command)) && !/--type=/.test(x.command)) out.push(x.pid);
     else stack.push(...(kids.get(x.pid) ?? []));
   }
   return out;
