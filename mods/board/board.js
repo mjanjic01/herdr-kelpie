@@ -4,7 +4,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Popover } from "gpui-base";
 import { theme, props, openOverlay, closeOverlay, run, focused, notify, exec } from "herdr";
 import { depsOpen, depsLine, DEP_DONE, unblockInTab, COLUMNS, MOD, tasks, tasksOf, team, member, column, activeRun, liveStatus, runLimit, updateTask, launch, boardSettings, setBoardSettings, setBoardTeam, boardOfSpace, teamsOf, stateOf, outdated, lead, poll, ensureEngine, served, request, programTable, uid, programs, knownNow, ago, spaces, busyOn } from "./state.js";
-import { button, tiny, memberChip, programIcon, statusGlyph, STATUS_WORDS, colorOf, dot } from "./ui.js";
+import { button, tiny, memberChip, programIcon, statusGlyph, STATUS_WORDS, colorOf, dot, SPINNER } from "./ui.js";
 import { noteOf, plain, clip } from "./note.js";
 import { limitLine } from "./limit.js";
 
@@ -25,6 +25,7 @@ export class Board extends View {
     this.pointer = null; // where, in the root's px
     this.over = null;    // the column under the pointer
     this.errors = {};    // task id -> last start error
+    this.starting = {};  // task id -> true while its start request waits for the engine
     this.handle = cx.focus_handle();
     cx.spawn(async (cx) => { await programs(); cx.notify(); });
     // The engines do the work; one copy of the screen reads them (poll), and
@@ -79,12 +80,16 @@ export class Board extends View {
   }
 
   start(t, cx) {
+    if (this.starting[t.id]) return;
     delete this.errors[t.id];
+    this.starting[t.id] = true;
     this.press = null; this.drag = null; this.pointer = null;
+    cx.notify();
     cx.spawn(async (cx) => {
       const had = this.handle.is_focused();
       try { await launch(t); }
       catch (e) { this.errors[t.id] = String(e?.message ?? e); }
+      delete this.starting[t.id];
       if (had) this.handle.focus();
       cx.notify();
     });
@@ -124,7 +129,8 @@ export class Board extends View {
     const space = spaces().find((s) => s.id === t.space);
     const err = this.errors[t.id];
     const prog = knownNow().find((p) => p.key === m?.program);
-    const canStart = Boolean(m) && !run && t.column !== "done" && !depsOpen(t).length;
+    const starting = Boolean(this.starting[t.id]) && !run;
+    const canStart = Boolean(m) && !run && !starting && t.column !== "done" && !depsOpen(t).length;
     return v_flex().id(ghost ? `ghost-${t.id}` : `card-${t.id}`).w_full().p(10).gap(7).rounded(8).flex_none()
       .bg(tm.surface).border_1().border_color(t.attention ? tm.blocked : this.drag === t.id && !ghost ? tm.accent : tm.border)
       .when(this.drag === t.id && !ghost, (el) => el.opacity(0.35))
@@ -164,7 +170,9 @@ export class Board extends View {
         .child(div().flex_1())
         .when((t.prs?.length ?? 0) > 0, (el) => el.child(this.prChips(t, ghost)))
         .when(Boolean(t.attention) && !ghost, (el) => el.child(tiny(`unblock-${t.id}`, "Unblock ↗", (_e, cx) => this.unblock(t, cx))))
-        .when(canStart && !ghost, (el) => el.child(tiny(`start-${t.id}`, "▶ Start", (_e, cx) => this.start(t, cx)))));
+        .when(canStart && !ghost, (el) => el.child(tiny(`start-${t.id}`, "▶ Start", (_e, cx) => this.start(t, cx))))
+        .when(starting, (el) => el.child(h_flex().items_center().gap(4).text_color(tm.muted)
+          .child(svg(SPINNER).size(11).flex_none().text_color(tm.working ?? tm.muted).spin(900)).child("Starting…"))));
   }
 
   // The task's pull requests: a GitHub mark and their numbers, colored by state.
@@ -277,7 +285,7 @@ export class Board extends View {
     const s = boardSettings(this.space());
     const space = this.space();
     const all = tasksOf(space);
-    const working = all.filter((t) => liveStatus(t) === "working").length;
+    const working = all.filter((t) => ["working", "waiting"].includes(liveStatus(t))).length;
     const needs = all.filter((t) => t.attention || liveStatus(t) === "blocked").length;
     const limited = all.filter((t) => liveStatus(t) === "limited").length;
     const gate = stateOf(boardOfSpace(space)?.machine ?? space?.machine ?? null)?.loadGate ?? null;

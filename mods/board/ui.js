@@ -73,12 +73,14 @@ export function statusGlyph(status, size = 12) {
   if (status === "blocked") return div().flex_none().w(size).h(size).rounded_full().bg(t.blocked).loop("opacity", { from: 0.45, to: 1, period: 1200 });
   if (status === "done") return div().flex_none().w(size).h(size).rounded_full().bg(t.done);
   if (status === "idle") return div().flex_none().w(size).h(size).rounded_full().border_1().border_color(t.idle);
+  // Stopped but waiting on a command it started (a Monitor, a background shell).
+  if (status === "waiting") return div().flex_none().w(size).h(size).rounded_full().border_2().border_color(t.working).loop("opacity", { from: 0.4, to: 1, period: 2400 });
   // Waiting for a usage limit to reset: slower and greyer than blocked.
   if (status === "limited") return div().flex_none().w(size).h(size).rounded_full().bg(t.muted).loop("opacity", { from: 0.35, to: 0.9, period: 2400 });
   return null;
 }
 
-export const STATUS_WORDS = { working: "working", blocked: "needs you", done: "finished", idle: "idle", limited: "usage limit" };
+export const STATUS_WORDS = { working: "working", blocked: "needs you", done: "finished", idle: "idle", limited: "usage limit", waiting: "waiting" };
 
 export function section(title, right) {
   const t = theme();

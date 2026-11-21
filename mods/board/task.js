@@ -371,9 +371,9 @@ export class TaskView extends View {
       .child(div().flex_1())
       .child(button("delete", this.confirmDelete ? "Really delete" : "Delete", (_e, cx) => {
         if (!this.confirmDelete) { this.confirmDelete = true; cx.notify(); return; }
-        removeTask(t.id).catch(() => {});
-        this.close();
-      }, { danger: true }));
+        // Wait for the engine: closing first cancels a remote send before it is written.
+        this.run(cx, async () => { await removeTask(t.id); this.close(); });
+      }, { danger: true, disabled: this.busy }));
     const picker = this.pick === "assign"
       ? chips("pa", team().map((x) => ({ id: x.id, label: `${x.name} · ${x.role}`, color: x.color })), t.assignee, (id, cx) => {
           this.pick = null; this.run(cx, () => updateTask(t.id, { assignee: id }));

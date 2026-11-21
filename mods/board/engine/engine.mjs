@@ -132,8 +132,10 @@ function wrapped(argv, pre = "", after = "") {
   return niced([SHELL, "-lic", `unset ${LEAKED_ENV.join(" ")}; ${pre}"$@"; ${after}exec "$0" -li`, SHELL, ...argv], settings.niceness);
 }
 const found = {};
+// Asking the login shell takes about half a second, so a found program is
+// remembered for 10 minutes; a missing one is asked again after a minute.
 async function installed(cmd) {
-  if (found[cmd] && Date.now() - found[cmd].at < 60000) return found[cmd].ok;
+  if (found[cmd] && Date.now() - found[cmd].at < (found[cmd].ok ? 600000 : 60000)) return found[cmd].ok;
   const r = await run(SHELL, ["-lic", 'command -v "$1"', SHELL, cmd], { timeout: 20000 });
   const ok = r.code === 0 && r.stdout.trim() !== "";
   found[cmd] = { ok, at: Date.now() };
@@ -426,6 +428,7 @@ function runStatus(r) {
   if (!k || k.state !== "live") return null;
   if (holding(r)) return "working";
   if ((k.status === "blocked" || k.status === "error") && r.limit?.auto) return "limited";
+  if ((k.status === "idle" || k.status === "done") && waiting.has(r.terminal)) return "waiting";
   return k.status === "error" ? "blocked" : (k.status ?? "idle");
 }
 // Where a space is now: its first terminal's live folder, else where it was made.
@@ -651,13 +654,27 @@ async function repoOf(folder) {
 // What a new task branches from: the repository's default branch, fresh from
 // origin, not whatever the board's checkout has now (another task may have
 // switched it). Without a remote: the checkout's HEAD.
+// Only that branch is fetched (a full fetch of a big repo takes seconds), and
+// not again within FETCH_FRESH: tasks started together share one fetch.
+const FETCH_FRESH = 120000;
+const fetchedAt = {}; // "<repo> <branch>" -> when it was last fetched
 async function baseRef(top) {
   if (!(await git(top, ["remote", "get-url", "origin"])).ok) return "HEAD";
   let head = (await git(top, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).out;
-  const fetched = (await run("git", ["-C", top, "fetch", "--quiet", "origin"], { timeout: 120000 })).code === 0;
   if (!head) for (const b of ["origin/main", "origin/master"]) if ((await git(top, ["rev-parse", "--verify", "--quiet", b])).ok) { head = b; break; }
-  if (!head) return "HEAD";
-  if (!fetched) log("fetch failed in", top, "; branching from the last fetched", head);
+  if (!head) {
+    // Nothing fetched yet: a full fetch finds the default branch.
+    await run("git", ["-C", top, "fetch", "--quiet", "origin"], { timeout: 120000 });
+    for (const b of ["origin/main", "origin/master"]) if ((await git(top, ["rev-parse", "--verify", "--quiet", b])).ok) { head = b; break; }
+    return head || "HEAD";
+  }
+  const name = head.replace(/^origin\//, "");
+  const key = `${top} ${name}`;
+  if (Date.now() - (fetchedAt[key] ?? 0) > FETCH_FRESH) {
+    const fetched = (await run("git", ["-C", top, "fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${name}:refs/remotes/origin/${name}`], { timeout: 120000 })).code === 0;
+    if (fetched) fetchedAt[key] = Date.now();
+    else log("fetch failed in", top, "; branching from the last fetched", head);
+  }
   return head;
 }
 const branchOf = async (folder) => (await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"])).out || null;
@@ -1254,7 +1271,7 @@ const STOPPED = (who, until) => `${STOPPED_HEAD(who)} Peek, then run /rate-limit
 // and then works again, the question is answered. Returns the run's new flags.
 export function blockStep(r, st) {
   if (!r?.blocked || r.blockAnswered) return null;
-  if (st === "idle" || st === "done" || st === "blocked") return r.blockPaused ? null : { blockPaused: true };
+  if (st === "idle" || st === "done" || st === "waiting" || st === "blocked") return r.blockPaused ? null : { blockPaused: true };
   if (st === "working" && r.blockPaused) return { blockAnswered: true };
   return null;
 }
@@ -1271,7 +1288,7 @@ function alert() {
     let next = t;
     if (mine) {
       let note = t.attention ?? null;
-      if (stopped && (st === "blocked" || st === "idle" || st === "done")) note = STOPPED(who, r.limit.until);
+      if (stopped && (st === "blocked" || st === "idle" || st === "done" || st === "waiting")) note = STOPPED(who, r.limit.until);
       else if (st === "blocked" && !r.limit) note = WAITS(who);
       else if (st && st !== "blocked") note = null;
       if (note !== (t.attention ?? null)) next = { ...next, attention: note };
@@ -1298,14 +1315,21 @@ const QUIET_STOP = 30000;
 // Claude Code runs each Bash command as a child shell that sources one of its
 // shell snapshots; one still running (a test suite, a Monitor) means the agent
 // waits for its own work, not for the person.
+// Claude's commands run in a shell that sources its snapshot; Codex's (and its
+// background terminals) in a shell started right under codex. Codex's other
+// children (codex-code-mode-host, MCP servers) are no shells.
+const CODEX = /^(\S*\/)?codex(\s|$)/;
+const SHELL_CMD = /^(\S*\/)?(zsh|bash|sh|fish)\s+-l?c\s/;
 export function busyBelow(pid, rows) {
   if (!pid) return false;
   const kids = new Map();
+  const by = new Map(rows.map((x) => [x.pid, x]));
   for (const x of rows) { if (!kids.has(x.ppid)) kids.set(x.ppid, []); kids.get(x.ppid).push(x); }
   const stack = [...(kids.get(pid) ?? [])];
   while (stack.length) {
     const x = stack.pop();
     if (/\.claude\/shell-snapshots\/snapshot-/.test(x.command)) return true;
+    if (SHELL_CMD.test(x.command) && CODEX.test(by.get(x.ppid)?.command ?? "")) return true;
     stack.push(...(kids.get(x.pid) ?? []));
   }
   return false;
@@ -1385,8 +1409,21 @@ async function closeBrowsers() {
     }
   }
 }
-async function stalls() {
+// Active runs whose agent says it stopped (idle, done) while a command it
+// started still runs: a Monitor, a background shell or terminal it waits on. Their
+// cards say "waiting", not "finished". Read once per pass, before alert().
+let waiting = new Set();
+async function waits() {
   procs = null;
+  const next = new Set();
+  for (const t of tasks) {
+    const r = activeRun(t);
+    const k = r && isLive(r) ? term(r.terminal) : null;
+    if (k && (k.status === "idle" || k.status === "done") && busyBelow(k.pid, await procRows())) next.add(r.terminal);
+  }
+  waiting = next;
+}
+async function stalls() {
   const now = Date.now();
   for (const t of tasks) {
     const r = activeRun(t);
@@ -2125,6 +2162,7 @@ async function pass() {
       updateLimitGate();
       gateWaits();
       heavyWaits();
+      await waits();
       alert();
       await stalls();
       await closeBrowsers();

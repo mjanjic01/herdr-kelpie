@@ -153,6 +153,19 @@ test("a running Claude Bash command below the agent counts as busy", () => {
   assert.equal(busyBelow(null, rows), false);
 });
 
+test("a running Codex command or background terminal below the agent counts as busy", () => {
+  const rows = psRows([
+    "  200     1 codex --model gpt --sandbox workspace-write",
+    "  210   200 npm exec chrome-devtools-mcp@latest --isolated",
+    "  211   210 /bin/sh -c chrome-devtools-mcp",
+    "  220   200 /opt/homebrew/Caskroom/codex/0.166.0/bin/codex-code-mode-host",
+    "  230   200 /bin/zsh -c npx vitest related --run > out.log",
+    "  231   230 npm exec vitest related",
+  ].join("\n"));
+  assert.equal(busyBelow(200, rows), true);
+  assert.equal(busyBelow(200, rows.filter((x) => x.pid !== 230 && x.pid !== 231)), false); // MCP servers and the host only
+});
+
 test("a reset time is today, or tomorrow when it already passed", () => {
   const seen = new Date(2026, 9, 31, 19, 16).getTime();
   assert.equal(new Date(resetAt("10pm", seen)).getHours(), 22);
@@ -259,6 +272,7 @@ test("a question answered in the terminal: stopped after asking, then working ag
   const r = { blocked: "Pick A or B?" };
   assert.equal(blockStep(r, "working"), null);              // still writing the result: not yet
   assert.deepEqual(blockStep(r, "idle"), { blockPaused: true });
+  assert.deepEqual(blockStep(r, "waiting"), { blockPaused: true }); // stopped, a background command still runs
   const paused = { ...r, blockPaused: true };
   assert.equal(blockStep(paused, "idle"), null);
   assert.deepEqual(blockStep(paused, "working"), { blockAnswered: true });

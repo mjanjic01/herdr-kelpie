@@ -254,8 +254,11 @@ export function newTask(fields, space) {
 }
 export const removeTask = (id) => request(taskMachine(id), { op: "remove", id }, { pend: { kind: "remove", id } });
 export const removeTaskDir = () => {};
-export const launch = (t, memberId) => request(t.machine ?? null, { op: "start", id: t.id, ...(memberId ? { member: memberId } : {}) });
-export const restart = (t, memberId) => request(t.machine ?? null, { op: "start", id: t.id, restart: true, ...(memberId ? { member: memberId } : {}) });
+// A start fetches the repo and makes the task's worktree first (the engine
+// allows its fetch 120 s), so it gets longer than the usual answer time.
+const START_WAIT = 180000;
+export const launch = (t, memberId) => request(t.machine ?? null, { op: "start", id: t.id, ...(memberId ? { member: memberId } : {}) }, { wait: START_WAIT });
+export const restart = (t, memberId) => request(t.machine ?? null, { op: "start", id: t.id, restart: true, ...(memberId ? { member: memberId } : {}) }, { wait: START_WAIT });
 export const endRun = (taskId, runId, how) => request(taskMachine(taskId), { op: "stop", id: taskId, run: runId, how });
 export const nudge = (t) => request(t.machine ?? null, { op: "nudge", id: t.id });
 export const reply = (t, text) => request(t.machine ?? null, { op: "reply", id: t.id, text });
