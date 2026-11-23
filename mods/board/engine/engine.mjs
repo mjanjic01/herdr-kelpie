@@ -2193,6 +2193,8 @@ async function pass() {
       again = false;
       await look();
       await drain();
+      // Requests show on screen before this pass starts agents (a start can take seconds).
+      if (dirty) save();
       await checkLoad(); // before results: a hand-off start must see a closed gate
       await results();
       reconcile();

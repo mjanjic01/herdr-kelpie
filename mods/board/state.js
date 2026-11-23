@@ -182,7 +182,14 @@ export function tasksOf(space) {
 export function boardSettings(space) {
   const b = boardOfSpace(space);
   const st = stateOf(b?.machine ?? space?.machine ?? null);
-  return { autopilot: true, openTabs: false, ...(st?.settings ?? {}), pickup: false, worktrees: true, ...(b?.record?.settings ?? {}) };
+  const out = { autopilot: true, openTabs: false, ...(st?.settings ?? {}), pickup: false, worktrees: true, ...(b?.record?.settings ?? {}) };
+  // A switch flipped but not yet in a snapshot shows its new value at once.
+  for (const p of shared(KEY_PENDING) ?? []) {
+    if (p.kind !== "settings" || p.machine !== (b?.machine ?? null) || (p.folder && p.folder !== b?.folder)) continue;
+    if ((st?.applied ?? []).includes(p.name) || Date.now() - p.at > 30000) continue;
+    Object.assign(out, p.patch);
+  }
+  return out;
 }
 export function setBoardSettings(space, patch) {
   const b = boardOfSpace(space);
@@ -191,8 +198,8 @@ export function setBoardSettings(space, patch) {
   const boardLevel = {};
   for (const [k, v] of Object.entries(patch)) (["autopilot", "openTabs", "maxRuns", "heavySlots", "niceness"].includes(k) ? machineLevel : boardLevel)[k] = v;
   const out = [];
-  if (Object.keys(machineLevel).length) out.push(request(b.machine, { op: "set-settings", settings: machineLevel }));
-  if (Object.keys(boardLevel).length) out.push(request(b.machine, { op: "board-set", folder: b.folder, settings: boardLevel }));
+  if (Object.keys(machineLevel).length) out.push(request(b.machine, { op: "set-settings", settings: machineLevel }, { pend: { kind: "settings", folder: null, patch: machineLevel } }));
+  if (Object.keys(boardLevel).length) out.push(request(b.machine, { op: "board-set", folder: b.folder, settings: boardLevel }, { pend: { kind: "settings", folder: b.folder, patch: boardLevel } }));
   return Promise.all(out);
 }
 export const setBoardTeam = (space, teamId) => {
@@ -210,7 +217,11 @@ export function request(machine, body, { pend = null, wait = 20000 } = {}) {
   const name = `${uid("s")}.json`;
   // On screen at once, before anything is sent.
   if (pend) setShared(KEY_PENDING, [...(shared(KEY_PENDING) ?? []).filter((p) => Date.now() - p.at < 30000), { name, machine, at: Date.now(), ...pend }]);
-  return send(machine, name, body, wait);
+  // A refused or lost request stops showing on screen at once.
+  return send(machine, name, body, wait).catch((e) => {
+    if (pend) setShared(KEY_PENDING, (shared(KEY_PENDING) ?? []).filter((p) => p.name !== name));
+    throw e;
+  });
 }
 async function send(machine, name, body, wait) {
   const home = await homeOn(machine);
