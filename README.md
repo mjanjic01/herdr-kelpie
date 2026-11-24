@@ -13,9 +13,9 @@ Kelpie is a software factory for coding agents in the [Herdr](https://herdr.dev)
 | ![The board](screenshots/board.png) | ![The settings menu](screenshots/settings-menu.png) |
 | The board: a task that needs you (with Unblock ↗), one waiting for its dependencies, one working on its own branch, and a Codex reviewer | The settings menu: Autopilot, Pick up, Worktrees, Tabs, the run limit, the board's team, and the Teams and Machine windows |
 | ![A task](screenshots/task.png) | ![Teams with a Codex member](screenshots/teams.png) |
-| A task: its description, pull requests, dependencies, runs and history | The Teams window: a Codex member with its model, and a secret that is set |
-| ![The Machine window](screenshots/machine.png) | |
-| The Machine window: the last hour's load, memory and swap, the load gate, browser slots and the machine's settings | |
+| A task: its id (click to copy), description, pull requests, dependencies, runs and history. The folder icon opens its files | The Teams window: a Codex member with its model, and a secret that is set |
+| ![The Machine window](screenshots/machine.png) | ![A task's files](screenshots/files.png) |
+| The Machine window: the last hour's load, memory and swap, the load gate, browser slots and the machine's settings | A task's files: the brief, plan, handoff notes and results the agents leave in its folder, with a preview |
 
 ## Install
 
