@@ -538,6 +538,10 @@ export const isImage = (name) => /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(name ??
 export const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 export const filesDir = (machine, id) => `${homeNow(machine)}/tasks/${id}/files`;
 export const fileOf = (t, a) => `${filesDir(t.machine ?? null, t.id)}/${a.name}`;
+// image() loads from the app home: a path inside it must go as a relative one.
+export const imagePath = (abs) => { const home = appHome(); return home && abs.startsWith(`${home}/`) ? abs.slice(home.length + 1) : abs; };
+// An attachment's thumbnail source, or null when it is not a picture here (another machine's).
+export const attachmentSrc = (machine, id, a) => machine || !isImage(a.name) ? null : imagePath(`${filesDir(null, id)}/${a.name}`);
 
 function freeName(name, taken) {
   const dot = name.lastIndexOf(".");

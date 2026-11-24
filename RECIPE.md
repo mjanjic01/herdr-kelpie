@@ -22,11 +22,13 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
   - "N runs · 2h". If the task needs the person, "Unblock ↗" follows. If the task has an assignee and no run, "▶ Start" follows.
   - On the right of that row, if the task has pull requests: a GitHub mark (`github.svg`, 11 px) and "#<number>" for each, green when open, muted when draft, ANSI magenta when merged, dim and struck through when closed. Hover shows the state; a click opens the PR in the browser and does not open the card. The engine finds them (below).
 - **Task dialog:**
-  - The status and the column chip, then the member, the program and the model.
+  - The title, then (once the task has a folder) a folder icon that opens the Files dialog, and ✕.
+  - The status and the column chip, then the member, the program and the model. On the right, the task id in a monospace chip: the text can be selected, and a click on the chip copies it ("copy" turns to "copied").
   - The description, rendered as markdown, with Copy and Source.
   - Depends on: each dependency with its column, a green dot for Review or Done and a red one otherwise; a click opens it. The edit form has a picker of the board's other tasks (with a filter, without tasks that would make a loop).
   - Pull requests: each GitHub PR linked in the description, the history or the results, as "#<number> <title>" with Draft, Open, Merged or Closed, from `gh pr view --json number,title,state,isDraft` (refreshed every minute). A click opens it.
-  - Attachments.
+  - Attachments: a thumbnail for each image on this Mac, a file chip for the rest.
+- **Files dialog** (`props: { view: "files", id }`, 1080 × 760): the task folder (`tasks/<id>/`) as a tree on the left (270 px; folders first, folders with 12 entries or fewer open) and the chosen file on the right: markdown rendered, JSON pretty-printed in a read-only code view, other text as code, images fitted. It opens on `brief.md`, else `PLAN.md`, else the newest markdown file. Every 5 seconds it lists the folder again and reloads the shown file if it changed. Up and down move through the tree, left and right fold, Esc closes. "Open" and "Open in Finder" are there for a folder on this Mac.
   - Runs: the task folder, and the worktree branch and path. Each run shows its member, start time, status and result, with Peek, "Open as tab" and Stop.
   - History, newest first.
   - The actions: "Unblock in tab ↗" (only when the task needs the person), Start, Restart, Nudge, Assign ▾, the column ▾, Edit, Close finished runs, and Delete.
@@ -117,7 +119,7 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
   - **Engines:** `ensureEngine()` installs the engine and keeps it current.
   - **Secrets:** `secretSet()` and `secretStatus()`.
 - **`mods/board/board.js`:** the board view, cards, drag and drop, and the header with its `Popover` settings menu. `props().menu` opens the menu at start. One copy leads, through `board/screen-leader.json`: it polls the engines every 2 s and checks their version once a minute.
-- **`mods/board/task.js`, `mods/board/team.js`, `mods/board/env.js`, `mods/board/machine.js`, `mods/board/boards.js`:** the task dialog, the Teams window, the board setup dialog, the Machine window and the Boards window (`props: { view: "boards", machine?, team? }`; with a team it shows only that team's boards).
+- **`mods/board/task.js`, `mods/board/team.js`, `mods/board/env.js`, `mods/board/machine.js`, `mods/board/boards.js`:** the task dialog, the Teams window, the board setup dialog, the Machine window and the Boards window; `mods/board/files.js` is the Files dialog (`props: { view: "boards", machine?, team? }`; with a team it shows only that team's boards).
 - **`mods/board/mdeditor.js` and `mods/board/mdsync.js`:** the markdown editor whose source and preview scroll together. `mods/board/textblock.js`, `mods/board/note.js`, `mods/board/limit.js` and `mods/board/ui.js` hold the shared pieces.
 - **`mods/board/engine/engine.mjs`:** one Node file with no dependencies, the engine.
   - **Where it runs:** the launchd user agent `dev.herdr.board` (KeepAlive) runs it on each Mac. Its home is `~/.config/herdr-app/board` on the Mac with the app and `~/.herdr/board` on others. It is the only writer of `tasks.json`, `boards.json`, `teams.json` and `settings.json`.
@@ -155,6 +157,7 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
 - **Redraw on the shared cache, not on your own load.** Every copy of the mod shares the engine states. Often another copy (the board) reads a new state first, so a dialog's own `loadStates()` finds nothing new and the dialog shows an old list. Compare `statesGen()` instead.
 - **An open board brings its board back.** The board view saves a board it shows without a record. Removing a board whose space is open only resets it, so close its board panes before `board-remove`, and say so in the confirm text.
 - **Do not forget a board on one missed check.** Wait a minute, and keep boards with tasks or shown in a space: a folder can be gone for a moment (a checkout being moved), and removing a board loses its settings and standing answers.
+- **Give `image()` a path relative to the app home.** It loads images from `~/.config/herdr-app`: an absolute path, even one inside it, draws nothing. Task files sit under `board/tasks/`, so strip the home prefix (`imagePath` in `state.js`). An image without a size also draws nothing: give it `size_full()` or a height.
 - **Engine updates need an open board.** An engine update reaches a machine only while a board view is open somewhere.
 
 - **Check the load before anything can start, and keep the gate across restarts.** The pass reads the load before it handles results (a result can start the next member at once), and a restarted engine restores a closed gate from `state.json`. Without both, a restart on a busy machine started new agents.

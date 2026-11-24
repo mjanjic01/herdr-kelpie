@@ -105,15 +105,15 @@ export function chips(prefix, items, on, pick, opts = {}) {
   }));
 }
 
-// One attachment: a thumbnail for images, the name and the size; `open` on
-// click, `remove` as a small ×.
+// One attachment: a thumbnail for images (from `src`, see attachmentSrc), the
+// name and the size; `open` on click, `remove` as a small ×.
 export function fileChip(id, att, opts = {}) {
   const t = theme();
-  const pic = isImage(att.name);
+  const pic = isImage(att.name) && Boolean(opts.src);
   return v_flex().id(id).relative().w(pic ? 132 : 170).flex_none().gap(4).p(6).rounded(7).border_1().border_color(t.input).bg(t.raised)
     .when(Boolean(opts.open), (el) => el.cursor_pointer().hover((s) => s.border_color(t.accent)).on_click((e, cx) => { cx.stop_propagation(); opts.open(e, cx); }))
     .when(pic, (el) => el.child(div().h(56).w_full().rounded(5).overflow_hidden().bg(t.background).flex().items_center().justify_center()
-      .child(image(att.path).h(56))))
+      .child(image(opts.src).size_full())))
     .child(h_flex().items_center().gap(5).text_size(11).pr(opts.remove && !pic ? 16 : 0)
       .when(!pic, (el) => el.child(div().flex_none().text_color(t.dim).child("📄")))
       .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(att.name)))

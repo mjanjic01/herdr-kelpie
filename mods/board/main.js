@@ -5,6 +5,7 @@
 //   view: "team"    the team editor
 //   view: "machine" a machine's last hour, gate, slots and settings
 //   view: "boards"  every board on every machine: where it is open, its folder
+//   view: "files"   a task's folder: file tree and preview
 import { View, div } from "gpui-kit";
 import { props } from "herdr";
 import { Board } from "./board.js";
@@ -14,8 +15,9 @@ import { TeamsView } from "./team.js";
 import { EnvView } from "./env.js";
 import { MachineView } from "./machine.js";
 import { BoardsView } from "./boards.js";
+import { FilesView } from "./files.js";
 
-const VIEWS = { task: TaskView, team: TeamsView, teams: TeamsView, env: EnvView, machine: MachineView, boards: BoardsView };
+const VIEWS = { task: TaskView, team: TeamsView, teams: TeamsView, env: EnvView, machine: MachineView, boards: BoardsView, files: FilesView };
 
 export default class Main extends View {
   init(p, cx) {

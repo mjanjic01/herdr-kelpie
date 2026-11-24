@@ -1,9 +1,9 @@
 // One task as a dialog: a form for a new or edited task, else its details,
 // history, runs and the actions the person takes on it.
-import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState } from "gpui-base";
-import { theme, spaces, props, closeOverlay, openOverlay, run, exec } from "herdr";
-import { boardMates, depsOpen, DEP_DONE, depLoops, MOD, unblockInTab, COLUMNS, tasks, task, team, member, column, activeRun, liveStatus, runStatus, runLimit, updateTask, newTask, removeTask, removeTaskDir, where, launch, restart, endRun, tidy, goTo, paneOf, isLive, leftOver, nudge, reply, place, taskDir, knownNow, programs, ago, uid, attachments, copyIn, attach, detach, filesDir, pickFiles, openFile, removeWorktree, ctxOfTask, boardOfSpace, fileOf, homeNow } from "./state.js";
+import { View, div, svg } from "gpui-kit";
+import { v_flex, h_flex, InputState, TextView } from "gpui-base";
+import { theme, spaces, props, closeOverlay, openOverlay, run, exec, settings } from "herdr";
+import { boardMates, depsOpen, DEP_DONE, depLoops, MOD, unblockInTab, COLUMNS, tasks, task, team, member, column, activeRun, liveStatus, runStatus, runLimit, updateTask, newTask, removeTask, removeTaskDir, where, launch, restart, endRun, tidy, goTo, paneOf, isLive, leftOver, nudge, reply, place, taskDir, knownNow, programs, ago, uid, attachments, copyIn, attach, detach, filesDir, pickFiles, openFile, removeWorktree, ctxOfTask, boardOfSpace, fileOf, homeNow, attachmentSrc } from "./state.js";
 import { button, tiny, label, field, fileChip, memberChip, programIcon, statusGlyph, STATUS_WORDS, section, chips, titleRow, closeButton, colorOf, dot } from "./ui.js";
 import { MarkdownEditor } from "./mdeditor.js";
 import { TextBlocks } from "./textblock.js";
@@ -52,6 +52,16 @@ export class TaskView extends View {
     });
     cx.timer.after(60, prs);
     cx.timer.every(60000, prs);
+    // The Files icon shows once the task has a folder (the engine makes it on the first start).
+    const dir = (cx) => cx.spawn(async (cx) => {
+      const t = this.id ? task(this.id) : null;
+      const path = taskDir(t);
+      let has = false;
+      if (path) { try { has = (await exec("test", ["-d", path], { on: t.machine ?? null })).code === 0; } catch {} }
+      if (has !== this.hasDir) { this.hasDir = has; cx.notify(); }
+    });
+    cx.timer.after(60, dir);
+    cx.timer.every(5000, (cx) => { if (!this.hasDir) dir(cx); });
     this.editing = !this.id;
     this.busy = false;
     this.picking = false; // the file picker is open
@@ -240,7 +250,7 @@ export class TaskView extends View {
         || (!text.trim() ? "What, where, how to know it is done. Markdown; the preview shows it rendered." : "cmd-b, cmd-i, cmd-e, cmd-k format the selection. Drop files here to attach them.")))
       .child(label("Attachments"))
       .child(h_flex().flex_wrap().gap(6).items_end()
-        .children(files.map((a, i) => fileChip(`att-${i}`, a, { remove: (_e, cx) => this.removeFile(a.name, cx) })))
+        .children(files.map((a, i) => fileChip(`att-${i}`, a, { remove: (_e, cx) => this.removeFile(a.name, cx), src: attachmentSrc(this.machine(), this.id ?? this.pendingId, a) })))
         .child(tiny("attach", this.busy ? "Copying…" : this.picking ? "Choosing…" : "Attach…", (_e, cx) => this.browse(cx), { disabled: this.busy || this.picking })))
       .child(label("Board (the agents work in its folder)"))
       .child(board || t
@@ -346,6 +356,23 @@ export class TaskView extends View {
     }));
   }
 
+  // The task's id: selectable text, and a click on the chip copies it.
+  idChip(t) {
+    const tm = theme();
+    const copied = this.copiedId && Date.now() - this.copiedId < 1500;
+    return h_flex().id("task-id").flex_none().items_center().gap(5).px(6).py(1).rounded(5).bg(tm.raised).cursor_pointer()
+      .hover((s) => s.bg(tm.hover))
+      .on_click((_e, cx) => {
+        cx.write_to_clipboard(t.id);
+        this.copiedId = Date.now();
+        cx.notify();
+        cx.timer.after(1600, (cx) => cx.notify());
+      })
+      .child(div().font_family(settings().font_family).text_size(11).text_color(tm.muted)
+        .child(TextView.markdown(`task-id-${t.id}`, t.id).selectable(true).scrollable(false)))
+      .child(div().text_size(10.5).text_color(copied ? tm.working : tm.dim).child(copied ? "copied" : "copy"));
+  }
+
   details(t) {
     const tm = theme();
     const m = member(t.assignee);
@@ -387,6 +414,10 @@ export class TaskView extends View {
     return v_flex().size_full()
       .child(titleRow(t.title, h_flex().items_center().gap(8)
         .when(Boolean(status), (el) => el.child(h_flex().items_center().gap(5).text_size(11).text_color(status === "blocked" ? tm.blocked : tm.dim).child(STATUS_WORDS[status] ?? status).child(statusGlyph(status))))
+        .when(this.hasDir === true, (el) => el.child(div().id("files").flex_none().w(26).h(26).rounded(6).flex().items_center().justify_center()
+          .text_color(tm.dim).cursor_pointer().hover((s) => s.bg(tm.hover).text_color(tm.foreground))
+          .on_click((_e, cx) => { cx.stop_propagation(); openOverlay({ mod: MOD, kind: "dialog", width: 1080, height: 760, props: { view: "files", id: t.id } }); })
+          .child(svg(`mods/${MOD}/folder.svg`).size(15).text_color(tm.dim))))
         .child(closeButton("close", () => this.close()))))
       .child(h_flex().pt(6).items_center().gap(10).text_size(11.5)
         .child(h_flex().items_center().gap(5).px(7).py(2).rounded(5).bg(tm.raised).text_color(tm.muted).child(col.name))
@@ -394,6 +425,7 @@ export class TaskView extends View {
         .when(Boolean(prog), (el) => el.child(h_flex().items_center().gap(4).text_color(tm.dim).child(programIcon(prog, 12)).child(prog.name)))
         .when(Boolean(m?.model), (el) => el.child(div().text_color(tm.dim).child(m.model)))
         .child(div().flex_1())
+        .child(this.idChip(t))
         .when(Boolean(space), (el) => el.child(div().text_color(tm.dim).truncate().child(`${space.name}`))))
       .when(Boolean(this.error), (el) => el.child(div().mt(8).p(8).rounded(6).bg(tm.surface).text_size(12).text_color(tm.blocked).child(this.error)))
       .when(Boolean(t.attention), (el) => el.child(this.text.noteBox(t)))
@@ -410,7 +442,7 @@ export class TaskView extends View {
         .when(attachments(t).length > 0, (el) => el
           .child(section("Attachments"))
           .child(h_flex().flex_wrap().gap(6).items_start().children(attachments(t).map((a, i) =>
-            fileChip(`att-${i}`, a, t.machine ? {} : { open: () => { openFile(fileOf(t, a)).catch(() => {}); } })))))
+            fileChip(`att-${i}`, a, t.machine ? {} : { open: () => { openFile(fileOf(t, a)).catch(() => {}); }, src: attachmentSrc(null, t.id, a) })))))
         .child(section("Runs", div().text_size(11).text_color(tm.dim).truncate().child(where(t))))
         .when(Boolean(t.worktree?.path), (el) => el.child(h_flex().items_center().gap(8).pb(6).text_size(11.5)
           .child(div().flex_1().min_w(0).truncate().text_color(tm.muted).child(`⎇ ${t.worktree.branch} · ${t.machine ? `${t.machine}:` : ""}${t.worktree.path}`))

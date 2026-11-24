@@ -20,8 +20,8 @@ The work runs in a board engine on each machine, not in this mod.
   sends every change to the engine's `inbox/` as a request. The change shows
   on screen at once. When the engine lists it as applied, the screen shows
   the engine's state instead.
-- `board.js`, `task.js`, `team.js` (the Teams window), `ui.js` and
-  `mdeditor.js` are the screens.
+- `board.js`, `task.js`, `team.js` (the Teams window), `files.js` (a
+  task folder's files), `ui.js` and `mdeditor.js` are the screens.
 - In the markdown editor (`mdeditor.js`), the two sides scroll together:
   scroll either one and the other shows the same part of the text.
   `mdsync.js` maps the offsets between the blocks of the text.
