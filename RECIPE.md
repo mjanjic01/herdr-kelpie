@@ -33,9 +33,9 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
 - **Settings menu ("Autopilot on ▾"):**
   - The switches Autopilot, Pick up, Worktrees and Tabs, each with its own hint line.
   - "Run limit: 20" with − and +.
-  - A TEAM list with a check next to this board's team, then "Board setup and notes…", "Teams…" and "Machine…".
+  - A TEAM list with a check next to this board's team, then "Board setup and notes…", "Teams…", "Boards…" and "Machine…".
 - **Teams window:**
-  - A machine picker, the team chips with member counts, "+ New team", and Rename, Duplicate, "Copy a member in…", "Copy to machine…" and Delete. Delete is turned off while a board uses the team.
+  - A machine picker, the team chips with member counts, "+ New team", and Rename, Duplicate, "Copy a member in…", "Copy to machine…" and Delete. Delete is turned off while a board uses the team. Next to Delete, "1 board uses it ›" or "2 boards use it ›" ("no board uses it" at 0) opens the Boards window for this team on this machine.
   - The member list, and the member form:
     - Name and Role.
     - The program chips.
@@ -47,6 +47,11 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
     - The hand-off chips.
     - The colour dots.
 - **Board setup and notes dialog:** the setup command, the environment notes, the standing answers, and "Browsers per test run" (the board's `workers`, with the hint that it is not how many agents work at once).
+- **Boards window (760×620):** "Boards" from the settings menu lists every board on every machine, grouped by machine, with the board count per machine. Opened from the Teams window, it is "Boards that use <team>" and lists only that team's boards on that team's machine; a line says that a team belongs to one machine. Each board is a rounded card (red border when its folder is gone):
+  - The folder's last part, the full path dimmed (`~` for home), and the buttons Show (the board is open in a space), "Open space" (not open, folder there) and "Remove…".
+  - A status dot and line: "open in <space names>" (working colour), "not open" (dim) or "folder gone" (blocked colour). Then the task counts per column ("2 In progress · 1 Done", or "no tasks") and "· N running".
+  - The team: chips to change it when the machine has more than one team, else "team <name>".
+  - "Remove…" turns into Keep and "Remove board" (or "Remove board and N tasks"), with a line that the board's settings, notes and standing answers go. If a space shows the board, the line says that it comes back there as a new board with the defaults; close the space first. With tasks, a red line says that their worktrees and branches stay. Remove is turned off while a task of the board runs ("Stop its runs to remove it.").
 - **Machine window (860×700):** a machine picker, then:
   - "Last hour": three rows of 120 columns (30 s each, the max of the samples in it), drawn with divs: load per core with a red line at the gate's factor, memory pressure as green/amber/red bands (the theme's ansi2, ansi3 and blocked), and swap used with a line at the swap gate when set. Columns where the gate was closed are shaded red. The current value sits next to each row label, and -60m, -30m and now are under the rows.
   - "Now": "Gate open" or "Gate closed: load 22.9 on 11 cores since 13:47", each browser slot with the task holding it (a click opens the task) or "free", and the tasks waiting for the gate or a slot.
@@ -90,6 +95,11 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
   - Idle sessions of finished runs close once the agent has been idle for 15 minutes and either the same member finished a later run of the task (only each member's newest session stays), or the task has sat in Review or Done for 30 minutes (the Machine setting "Clean up after Review"; 0 = never; the engine records `restAt` when a task enters Review or Done). Never a run shown in a tab, working or waiting for the person.
   - Pull requests for the cards: every 3 minutes (30 in Done) and in the background, the engine asks `gh pr list --head <worktree branch> --state all --json number,url,state,isDraft` in the task's worktree. Without a branch PR it uses the GitHub pull links in the description and the run summaries (`gh pr view <url>`). It keeps them as `prs: [{ number, url, state, draft }]` on the task.
   - A space shows the board of its first terminal's checkout, and the engine pins it (`pins` in `state.json`): the space keeps that board while it is open, even after its first terminal moves into a task's worktree. Pins of closed spaces go only after a successful read of the spaces.
+- **Boards come and go:**
+  - Each pass, the engine checks every board's folder. A missing folder marks the board `missing` (the time it was first missed) in `state.json`. After a minute missing, a board with no tasks that no open space shows is forgotten, with the toast "Board forgotten: <folder name>". It does not matter how the folder went (Herdr's Remove worktree, `git worktree remove`, `rm`). A board with tasks stays, marked, for the person.
+  - Remove in the Boards window first closes the board's panes in the spaces that show it (the whole tab when the board is alone in it, never a space's last tab). Then it sends `board-remove`. The card hides at once and comes back if the engine refuses. A removal by hand posts no toast.
+  - An open board view whose board has no record in its engine (new, or removed while open) saves it once with `board-set`, so the Teams and Boards windows count it.
+  - The engine never makes a board for a folder that does not exist.
 - **Secrets:** values go to the macOS Keychain of the team's machine, under service `herdr-board`. When a member starts, the agent gets them as environment variables, and its brief lists only the names.
 - **Teams across machines:** "Copy to machine…" copies the members by value. If the name is taken, the copy gets a new name. Programs missing there get a warning.
 - **Interaction:**
@@ -99,26 +109,27 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
 
 ## Built from
 
-- **`mods/board/main.js`:** picks the view from `props().view`: none for the board, `task`, `teams`, `env`. It builds the view after the first state load. That load starts from `cx.timer.after(30, …)`. Every render runs inside `within()`, which reads each live list once per render.
+- **`mods/board/main.js`:** picks the view from `props().view`: none for the board, `task`, `teams`, `env`, `machine`, `boards`. It builds the view after the first state load. That load starts from `cx.timer.after(30, …)`. A view redraws when `statesGen()` moved, not on `loadStates()`'s answer. Every render runs inside `within()`, which reads each live list once per render.
 - **`mods/board/state.js`:** the screen's client.
-  - **Reading:** `loadStates()` reads each engine's `state.json`. Remote states come through a copy in `board/cache/<machine>.json`. Shared state holds only `boardx.seqs`, a version string per machine.
+  - **Reading:** `loadStates()` reads each engine's `state.json` into one module-level cache, shared by every copy of the mod, and moves `statesGen()` on each new read. Remote states come through a copy in `board/cache/<machine>.json`. Shared state holds only `boardx.seqs`, a version string per machine.
   - **Writing:** `request()` writes `<home>/inbox/.<name>.tmp` and renames it to `<name>.json`. An overlay in `boardx.pending` shows the change until the engine lists the request in `applied`.
   - **Ids:** `qual()` and `local()` map ids between the app and an engine (`<machine>/t7` and `t7`).
   - **Engines:** `ensureEngine()` installs the engine and keeps it current.
   - **Secrets:** `secretSet()` and `secretStatus()`.
 - **`mods/board/board.js`:** the board view, cards, drag and drop, and the header with its `Popover` settings menu. `props().menu` opens the menu at start. One copy leads, through `board/screen-leader.json`: it polls the engines every 2 s and checks their version once a minute.
-- **`mods/board/task.js`, `mods/board/team.js`, `mods/board/env.js`, `mods/board/machine.js`:** the task dialog, the Teams window, the board setup dialog and the Machine window.
+- **`mods/board/task.js`, `mods/board/team.js`, `mods/board/env.js`, `mods/board/machine.js`, `mods/board/boards.js`:** the task dialog, the Teams window, the board setup dialog, the Machine window and the Boards window (`props: { view: "boards", machine?, team? }`; with a team it shows only that team's boards).
 - **`mods/board/mdeditor.js` and `mods/board/mdsync.js`:** the markdown editor whose source and preview scroll together. `mods/board/textblock.js`, `mods/board/note.js`, `mods/board/limit.js` and `mods/board/ui.js` hold the shared pieces.
 - **`mods/board/engine/engine.mjs`:** one Node file with no dependencies, the engine.
   - **Where it runs:** the launchd user agent `dev.herdr.board` (KeepAlive) runs it on each Mac. Its home is `~/.config/herdr-app/board` on the Mac with the app and `~/.herdr/board` on others. It is the only writer of `tasks.json`, `boards.json`, `teams.json` and `settings.json`.
   - **One pass every 2 s, and at once after an inbox change.** A pass reads the world, applies the requests and reads the results. Then it reconciles runs and checks limits, alerts and stalls. Last, it closes browsers, runs setup commands, checks branches, starts waiting work, closes idle sessions and saves.
   - **Its view of the world:** spaces and folders from `hc connect` → `doc.get {name: "herdr-app"}`, and terminals from `terminal.list`.
   - **Starting agents:** `hc run --bg --no-parent --cwd <worktree> --label board.task=… -- <login shell> -lic 'unset <leaked Claude vars>; <secret exports>"$@"; …' claude --model … --add-dir <task folder> -- "<first message>"`.
-  - **Inbox ops:** create, note, assign, move, update, remove, start, stop, nudge, reply, tidy, remove-worktree, board-set, board-remove, team-create, team-rename, team-duplicate, team-delete, team-set-members, team-copy-member, team-import, set-settings, import.
+  - **Inbox ops:** create, note, assign, move, update, remove, start, stop, nudge, reply, tidy, remove-worktree, board-set, board-remove, team-create, team-rename, team-duplicate, team-delete, team-set-members, team-copy-member, team-import, set-settings, import. `board-remove {board: <id>, tasks?: true}` takes the id (a gone folder cannot be named by path), refuses while the board has tasks unless `tasks` is set, and always refuses while one of them runs; the tasks' worktrees and branches stay.
+  - **Boards whose folder is gone:** `checkFolders()` in each pass keeps `goneSince` (in memory) and publishes it as `missing` on each board. `staleBoards(boards, tasks, spaceBoards, goneSince, now)` (exported, tested) picks the boards to forget after `GONE_MS` (60 s). `forgetBoard()` also drops the board's space pins.
   - **Secrets socket:** `<home>/secrets.sock`, mode 0600. It answers get (a one-time token from a start, valid 2 minutes), status, set (the value on stdin) and delete.
 - **`mods/board/engine/README.md` and `mods/board/engine/SKILL.md`:** the guide for agents outside the board, installed next to each engine, and the Claude Code skill `herdr-board`.
-- **herdr functions:** `spaces`, `panes`, `machines`, `shared`, `setShared`, `exec`, `readTextFile`, `appHome`, `knownAgents`, `notify`, `run`, `focused`, `props`, `openOverlay`, `closeOverlay`, `theme`, `settings`, `window`, `playSound`.
-- **Commands:** `tab.new`, `tab.select`, `tab.rename`, `tab.close`, `space.select`, `pane.focus`, `terminal.peek`.
+- **herdr functions:** `spaces`, `panes`, `machines`, `home`, `shared`, `setShared`, `exec`, `readTextFile`, `appHome`, `knownAgents`, `notify`, `run`, `focused`, `props`, `openOverlay`, `closeOverlay`, `theme`, `settings`, `window`, `playSound`.
+- **Commands:** `tab.new`, `tab.select`, `tab.rename`, `tab.close`, `space.new`, `space.select`, `pane.focus`, `pane.close`, `terminal.peek`.
 - **Programs:** `hc`, `node`, `git`, `security`, `launchctl`, `ps`, `sh` and your login shell, `claude` or `codex`.
 
 ## Watch out
@@ -140,6 +151,10 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
 - **Point agents at `"$BOARD_HEAVY"`, not `board-heavy` on PATH.** The login shell, and Claude's Bash tool, may rebuild PATH from the person's profile.
 - **A shell script's trap waits for a foreground child.** `board-heavy` runs the command in the background and `wait`s, so a TERM frees the slot at once.
 - **Tabs mode gives runs unnamed tabs.** Herdr shows the tab's number.
+- **Never act with a render's `cx`.** A button that calls `cx.spawn` or `cx.notify` with the `cx` its row got from `render` does nothing, without an error. Use the click's own `cx` (`(_e, cx) => …`).
+- **Redraw on the shared cache, not on your own load.** Every copy of the mod shares the engine states. Often another copy (the board) reads a new state first, so a dialog's own `loadStates()` finds nothing new and the dialog shows an old list. Compare `statesGen()` instead.
+- **An open board brings its board back.** The board view saves a board it shows without a record. Removing a board whose space is open only resets it, so close its board panes before `board-remove`, and say so in the confirm text.
+- **Do not forget a board on one missed check.** Wait a minute, and keep boards with tasks or shown in a space: a folder can be gone for a moment (a checkout being moved), and removing a board loses its settings and standing answers.
 - **Engine updates need an open board.** An engine update reaches a machine only while a board view is open somewhere.
 
 - **Check the load before anything can start, and keep the gate across restarts.** The pass reads the load before it handles results (a result can start the next member at once), and a restarted engine restores a closed gate from `state.json`. Without both, a restart on a busy machine started new agents.
@@ -159,3 +174,6 @@ Kelpie is a software factory for coding agents in Herdr: a kanban board where te
 - "Machine…" in the board's menu shows the last hour filling in from the right, the gate and slot state, and the machine's settings; saving changes `settings.json` on that machine.
 - `sh mods/board/engine/board-heavy.test.sh` passes: the exit code passes through, a stale slot is taken over, a second job waits with a marker, TERM frees the slot. An agent's shell shows `ps -o ni` 10, and `$BOARD_WORKERS` equals the board's workers.
 - With the Herdr app closed, a hand-off between two members still starts the next one.
+- Make a board in a worktree, then remove the worktree with the space closed: within about a minute `boards.json` no longer lists it and the toast "Board forgotten: <name>" shows. The same with a task on the board: it stays, and the Boards window shows "folder gone".
+- In the Boards window, "Remove board" on a board without tasks hides its card at once, closes its board tab, posts no toast, and `boards.json` no longer lists it. Reopening the window does not show it.
+- Opening a board in a folder without a board record adds it to `boards.json` with the machine's first team, and the Teams window then says "1 board uses it ›".
