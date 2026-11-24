@@ -9,7 +9,7 @@
 import { View, div } from "gpui-kit";
 import { props } from "herdr";
 import { Board } from "./board.js";
-import { within, loadStates, statesReady, statesGen } from "./state.js";
+import { within, loadStates, statesReady, statesGen, lead, poll, uid } from "./state.js";
 import { TaskView } from "./task.js";
 import { TeamsView } from "./team.js";
 import { EnvView } from "./env.js";
@@ -33,6 +33,9 @@ export default class Main extends View {
     const load = (cx) => cx.spawn(async (cx) => {
       if (this.loading) return;
       this.loading = true;
+      // A window (Teams, Boards, a task) reads the engines itself while no board
+      // view does: removing a board closes its view, and the window must see it go.
+      if (props()?.view) { try { if (await lead(this.me)) await poll(); } catch {} }
       try { await loadStates(); } catch {}
       this.loading = false;
       const changed = this.gen !== statesGen();
@@ -41,6 +44,7 @@ export default class Main extends View {
       else if (changed) cx.notify();
     });
     this.born = Date.now();
+    this.me = uid("w");
     this.gen = statesGen();
     if (statesReady()) start(cx);
     // The first load from a timer: one spawned straight from init never finishes
