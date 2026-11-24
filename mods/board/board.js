@@ -43,8 +43,20 @@ export class Board extends View {
         if (!this.checked || Date.now() - this.checked > 60000) { this.checked = Date.now(); await this.engines(); }
         await poll();
       }
+      await this.keepBoard();
     } catch (e) { console.log("board: " + (e?.message ?? e)); }
     this.ticking = false;
+  }
+
+  // A board on screen that its engine has no record of (new, or removed while
+  // open) is saved once, so the Teams and Boards windows count it.
+  async keepBoard() {
+    const b = boardOfSpace(this.space());
+    if (!b || b.record || b.taskWorktree || !b.folder) return;
+    const key = `${b.machine ?? ""}:${b.id}`;
+    if (this.kept === key) return;
+    this.kept = key;
+    await request(b.machine, { op: "board-set", folder: b.folder });
   }
 
   // Each machine runs the bundled engine, and knows how to start each program.
@@ -267,6 +279,9 @@ export class Board extends View {
       .child(h_flex().id("teams-open").items_center().px(10).py(6).rounded(6).cursor_pointer().hover((st) => st.bg(tm.hover))
         .on_click((_e, cx) => { this.menu = false; cx.notify(); this.openTeams(); })
         .child(div().text_size(12).text_color(tm.muted).child("Teams…")))
+      .child(h_flex().id("boards-open").items_center().px(10).py(6).rounded(6).cursor_pointer().hover((st) => st.bg(tm.hover))
+        .on_click((_e, cx) => { this.menu = false; cx.notify(); openOverlay({ mod: MOD, kind: "dialog", width: 760, height: 620, props: { view: "boards" } }); })
+        .child(div().text_size(12).text_color(tm.muted).child("Boards…")))
       .child(h_flex().id("machine-open").items_center().px(10).py(6).rounded(6).cursor_pointer().hover((st) => st.bg(tm.hover))
         .on_click((_e, cx) => { this.menu = false; cx.notify(); openOverlay({ mod: MOD, kind: "dialog", width: 860, height: 700, props: { view: "machine", machine: b?.machine ?? this.space()?.machine ?? null } }); })
         .child(div().text_size(12).text_color(tm.muted).child("Machine…")));

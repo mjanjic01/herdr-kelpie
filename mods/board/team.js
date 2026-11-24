@@ -4,8 +4,8 @@
 // and model each runs, their brief, and who they may hand a task to.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState } from "gpui-base";
-import { theme, props, closeOverlay, machines } from "herdr";
-import { team, member, uid, programs, knownNow, PALETTE, capacityOf, teamsOf, teamById, served, setTeamMembers, teamOp, copyTeam, stateOf, SECRET_NAME, secretAccount, secretStatus, secretSet } from "./state.js";
+import { theme, props, closeOverlay, openOverlay, machines } from "herdr";
+import { MOD, team, member, uid, programs, knownNow, PALETTE, capacityOf, teamsOf, teamById, served, setTeamMembers, teamOp, copyTeam, stateOf, SECRET_NAME, secretAccount, secretStatus, secretSet } from "./state.js";
 import { button, tiny, label, field, memberChip, programIcon, chips, titleRow, closeButton, colorOf, dot } from "./ui.js";
 import { MarkdownEditor } from "./mdeditor.js";
 
@@ -236,7 +236,9 @@ export class TeamsView extends View {
         .child(tiny("team-copy-in", "Copy a member in…", (_e, cx) => { this.pick = this.pick === "copy-in" ? null : "copy-in"; cx.notify(); }, { disabled: !otherMembers.length }))
         .child(tiny("team-copy-to", "Copy to machine…", (_e, cx) => { this.pick = this.pick === "copy-to" ? null : "copy-to"; cx.notify(); }, { disabled: !others.length }))
         .child(div().flex_1())
-        .child(div().text_size(10.5).text_color(tm.dim).child(usedBy ? `${usedBy} board${usedBy === 1 ? "" : "s"} use it` : "no board uses it"))
+        .child(div().id("team-boards").text_size(10.5).text_color(tm.dim).cursor_pointer().hover((st) => st.text_color(tm.foreground))
+          .on_click(() => openOverlay({ mod: MOD, kind: "dialog", width: 760, height: 620, props: { view: "boards", machine: this.machine, team: this.teamId } }))
+          .child(usedBy ? `${usedBy} board${usedBy === 1 ? " uses" : "s use"} it ›` : "no board uses it"))
         .child(tiny("team-delete", "Delete", (_e, cx) => this.op(cx, { op: "team-delete", team: this.teamId }, () => { this.teamId = teamsOf(this.machine).find((t) => t.id !== this.teamId)?.id ?? null; this.select(null, cx); }), { danger: true, disabled: usedBy > 0 }))))
       .when(this.pick === "copy-in", (el) => el.child(h_flex().gap(8).items_center().child(div().w(70).text_size(11).text_color(tm.dim).child("copy in"))
         .child(chips("ci", otherMembers, "", (id, cx) => { const [team, mem] = id.split(":"); this.pick = null; this.op(cx, { op: "team-copy-member", team: this.teamId, from: { team, member: mem } }); }))))

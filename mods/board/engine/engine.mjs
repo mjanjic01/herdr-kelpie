@@ -602,6 +602,35 @@ function ensureBoard(top) {
   }
   return b;
 }
+// ---- boards whose folder is gone ----
+// A board's folder can go: a worktree removed, a repository moved or deleted.
+// After GONE_MS without it, a board that no task uses and no open space shows
+// is forgotten. A board with tasks stays, marked missing: the person decides.
+export const GONE_MS = 60000;
+export function staleBoards(boards, tasks, spaceBoards, goneSince, now) {
+  const used = new Set(tasks.map((t) => t.board));
+  const seen = new Set(Object.values(spaceBoards ?? {}).filter((v) => !v.taskWorktree).map((v) => v.board));
+  return boards.filter((b) => goneSince[b.id] != null && now - goneSince[b.id] >= GONE_MS && !used.has(b.id) && !seen.has(b.id)).map((b) => b.id);
+}
+const goneSince = {}; // board id -> when its folder was first missing (this engine run)
+function checkFolders() {
+  const now = Date.now();
+  for (const b of boards) {
+    if (fs.existsSync(b.folder)) { if (goneSince[b.id] != null) { delete goneSince[b.id]; dirty = true; } }
+    else if (goneSince[b.id] == null) { goneSince[b.id] = now; dirty = true; }
+  }
+  for (const id of staleBoards(boards, tasks, world.spaceBoards, goneSince, now)) forgetBoard(id, "Its folder is gone and it had no tasks.");
+}
+// why: the toast's text; none for a board the person removed (they saw it go).
+function forgetBoard(id, why) {
+  const b = boardById(id);
+  if (!b) return;
+  boards = boards.filter((x) => x.id !== id);
+  for (const [sid, bid] of Object.entries(pins)) if (bid === id) delete pins[sid];
+  delete goneSince[id];
+  if (why) event("info", `Board forgotten: ${b.folder.split("/").pop()}`, `${b.folder}. ${why}`);
+  else dirty = true;
+}
 const boardOf = (t) => boardById(typeof t === "string" ? t : t?.board);
 const boardSet = (t) => ({ ...DEFAULT_BOARD, ...(boardOf(t)?.settings ?? {}) });
 const teamOf = (t) => teamById(boardOf(t)?.team);
@@ -1745,7 +1774,11 @@ async function teamCheck(members, other = true) {
 // The board a request means: by id, by a space, or by a folder (the checkout that holds it).
 async function boardFor(req) {
   if (req.board) { const b = boardById(req.board) ?? boards.find((x) => x.folder === clean(req.board)); if (b) return b; }
-  if (req.space && boardOfSpace(req.space)) return ensureBoard(world.spaceBoards[req.space].folder);
+  if (req.space && boardOfSpace(req.space)) {
+    const f = world.spaceBoards[req.space].folder;
+    if (!boardById(boardIdOf(f)) && !fs.existsSync(f)) throw new Error(`No folder ${f} on this machine.`);
+    return ensureBoard(f);
+  }
   const folder = clean(req.folder ?? req.board);
   if (!folder.startsWith("/")) throw new Error("Name the board by folder: the absolute path of the repository (or worktree) on this machine.");
   if (!fs.existsSync(folder)) throw new Error(`No folder ${folder} on this machine.`);
@@ -1917,14 +1950,16 @@ const OPS = {
     if (next.team !== b.team) flagStrangers(b.id);
     return { board: b.id, folder: b.folder, team: teamById(next.team)?.name ?? null, settings: next.settings };
   },
-  // Forgets a board that has no tasks (its folder may be gone). Its team stays.
+  // Forgets a board (its folder may be gone). Its team stays. With tasks: true,
+  // its tasks go too (their worktrees and branches stay), unless one runs.
   async "board-remove"(req) {
-    const b = await boardFor(req);
-    const left = tasks.filter((t) => t.board === b.id).length;
-    if (left) throw new Error(`The board still has ${left} task${left === 1 ? "" : "s"}: remove them first.`);
-    boards = boards.filter((x) => x.id !== b.id);
-    dirty = true;
-    return { board: b.id, folder: b.folder, removed: true };
+    const b = (req.board && boardById(req.board)) || await boardFor(req);
+    const mine = tasks.filter((t) => t.board === b.id);
+    if (mine.length && !req.tasks) throw new Error(`The board still has ${mine.length} task${mine.length === 1 ? "" : "s"}: remove them first.`);
+    if (mine.some(activeRun)) throw new Error("Someone works on a task of this board: stop the run first.");
+    for (const t of mine) await OPS.remove({ id: t.id });
+    forgetBoard(b.id, null);
+    return { board: b.id, folder: b.folder, removed: true, tasks: mine.length };
   },
   "set-settings": async (req) => {
     if (!req.settings || typeof req.settings !== "object") throw new Error("set-settings needs settings.");
@@ -2098,7 +2133,7 @@ function save() {
     writeAtomic(P("settings.json"), JSON.stringify(settings, null, 2));
   }
   const seq = Date.now();
-  writeAtomic(P("state.json"), JSON.stringify({ protocol: PROTOCOL, version: VERSION, machine: MACHINE, home: HOME, secretClient: { node: process.execPath, engine: ENGINE_FILE }, limitGate, loadGate, boardDefaults: DEFAULT_BOARD, seq, tasks, boards, teams, settings, spaces: world.spaceBoards, pins, live: liveNow, events, applied }));
+  writeAtomic(P("state.json"), JSON.stringify({ protocol: PROTOCOL, version: VERSION, machine: MACHINE, home: HOME, secretClient: { node: process.execPath, engine: ENGINE_FILE }, limitGate, loadGate, boardDefaults: DEFAULT_BOARD, seq, tasks, boards: boards.map((b) => (goneSince[b.id] != null ? { ...b, missing: goneSince[b.id] } : b)), teams, settings, spaces: world.spaceBoards, pins, live: liveNow, events, applied }));
   writeAtomic(P("seq"), String(seq));
   dirty = false;
   lastLive = liveText;
@@ -2110,7 +2145,7 @@ function summary() {
   const body = {
     machine: MACHINE ?? os.hostname(), protocol: PROTOCOL, engine: VERSION, inbox: P("inbox"),
     columns: COLUMNS.map((c) => c.id), autopilot: settings.autopilot,
-    boards: boards.map((b) => ({ folder: b.folder, team: teamById(b.team)?.name ?? null, pick_up: { ...DEFAULT_BOARD, ...b.settings }.pickup, worktrees: { ...DEFAULT_BOARD, ...b.settings }.worktrees, open: shown({ board: b.id }), members: (teamById(b.team)?.members ?? []).map((m) => memberView(m, b.id)) })),
+    boards: boards.map((b) => ({ folder: b.folder, team: teamById(b.team)?.name ?? null, pick_up: { ...DEFAULT_BOARD, ...b.settings }.pickup, worktrees: { ...DEFAULT_BOARD, ...b.settings }.worktrees, open: shown({ board: b.id }), ...(goneSince[b.id] != null ? { folder_missing: true } : {}), members: (teamById(b.team)?.members ?? []).map((m) => memberView(m, b.id)) })),
     teams: teams.map((tm) => ({ name: tm.name, members: tm.members.map((m) => m.name) })),
     // The first team's members, for readers from before boards.
     team: (teams[0]?.members ?? []).map((m) => ({ name: m.name, role: m.role, program: m.program, model: m.model || null })),
@@ -2198,6 +2233,7 @@ async function pass() {
       await checkLoad(); // before results: a hand-off start must see a closed gate
       await results();
       reconcile();
+      checkFolders();
       await limits();
       updateLimitGate();
       gateWaits();

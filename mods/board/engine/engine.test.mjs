@@ -410,3 +410,14 @@ test("depRef prefers the pushed branch, the local one when ahead, null when miss
     assert.equal(await depRef(repo, "board/dep-1"), "origin/board/dep-1");
   } finally { fsx.rmSync(tmp, { recursive: true, force: true }); }
 });
+
+test("a board is forgotten only when its folder is gone long enough, unused and not shown", async () => {
+  const { staleBoards, GONE_MS } = await import("./engine.mjs");
+  const boards = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }];
+  const tasks = [{ board: "b" }];
+  const spaces = { sp1: { board: "c" }, sp2: { board: "d", taskWorktree: true } };
+  const now = 1_000_000;
+  const gone = { a: now - GONE_MS, b: now - GONE_MS, c: now - GONE_MS, d: now - GONE_MS, e: now - GONE_MS + 1 };
+  assert.deepEqual(staleBoards(boards, tasks, spaces, gone, now), ["a", "d"]);
+  assert.deepEqual(staleBoards(boards, [], {}, {}, now), []);
+});

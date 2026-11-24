@@ -93,10 +93,14 @@ export async function loadStates() {
   let changed = false;
   for (const [k, seq] of Object.entries(seqs)) {
     if (mem[k]?.seq === seq) continue;
-    try { mem[k] = { seq, st: JSON.parse(await readTextFile(await stateFile(k))) }; changed = true; } catch {}
+    try { mem[k] = { seq, st: JSON.parse(await readTextFile(await stateFile(k))) }; changed = true; gen++; } catch {}
   }
   return changed;
 }
+// Moves on every load of any view: mem is shared by every copy of the mod, so a
+// view compares this, not loadStates' answer (another copy may have loaded it).
+let gen = 0;
+export const statesGen = () => gen;
 // Whether this view has read the engine states at least once.
 export const statesReady = () => Object.keys(mem).length > 0;
 const states = () => once("states", () => Object.fromEntries(Object.entries(mem).map(([k, v]) => [k, v.st])));

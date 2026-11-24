@@ -4,16 +4,18 @@
 //   view: "task"    one task: new (no id), or its details and actions
 //   view: "team"    the team editor
 //   view: "machine" a machine's last hour, gate, slots and settings
+//   view: "boards"  every board on every machine: where it is open, its folder
 import { View, div } from "gpui-kit";
 import { props } from "herdr";
 import { Board } from "./board.js";
-import { within, loadStates, statesReady } from "./state.js";
+import { within, loadStates, statesReady, statesGen } from "./state.js";
 import { TaskView } from "./task.js";
 import { TeamsView } from "./team.js";
 import { EnvView } from "./env.js";
 import { MachineView } from "./machine.js";
+import { BoardsView } from "./boards.js";
 
-const VIEWS = { task: TaskView, team: TeamsView, teams: TeamsView, env: EnvView, machine: MachineView };
+const VIEWS = { task: TaskView, team: TeamsView, teams: TeamsView, env: EnvView, machine: MachineView, boards: BoardsView };
 
 export default class Main extends View {
   init(p, cx) {
@@ -29,13 +31,15 @@ export default class Main extends View {
     const load = (cx) => cx.spawn(async (cx) => {
       if (this.loading) return;
       this.loading = true;
-      let changed = false;
-      try { changed = await loadStates(); } catch {}
+      try { await loadStates(); } catch {}
       this.loading = false;
+      const changed = this.gen !== statesGen();
+      this.gen = statesGen();
       if (!this.inner && (statesReady() || Date.now() - this.born > 5000)) start(cx, true);
       else if (changed) cx.notify();
     });
     this.born = Date.now();
+    this.gen = statesGen();
     if (statesReady()) start(cx);
     // The first load from a timer: one spawned straight from init never finishes
     // in a dialog (seen with Herdr 0.1.10), and its busy flag would block the rest.
