@@ -305,7 +305,8 @@ export class TaskView extends View {
       const ok = !x || DEP_DONE.has(x.column);
       return h_flex().id(`depl-${i}`).items_center().gap(8).px(6).py(4).rounded(6)
         .when(Boolean(x), (el) => el.cursor_pointer().hover((st) => st.bg(tm.hover))
-          .on_click(() => openOverlay({ mod: MOD, kind: "dialog", width: 700, height: 740, props: { view: "task", id } })))
+          // The other task takes this dialog's place: the dialogs do not stack.
+          .on_click(() => { openOverlay({ mod: MOD, kind: "dialog", width: 700, height: 740, props: { view: "task", id } }); this.close(); }))
         .child(dot(ok ? tm.working : tm.blocked, 7))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(tm.foreground).child(x?.title ?? "(deleted: counts as done)"))
         .child(div().flex_none().text_size(11).text_color(ok ? tm.working : tm.dim).child(x ? column(x.column).name : ""));
