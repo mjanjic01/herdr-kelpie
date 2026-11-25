@@ -3,7 +3,7 @@
 // The folder is the engine's tasks/<id>/: the brief, results, handoff notes, files.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, Editor, EditorState } from "gpui-base";
-import { theme, props, closeOverlay, exec, readTextFile, settings } from "herdr";
+import { theme, props, closeOverlay, exec, readTextFile, settings, appHome } from "herdr";
 import { task, taskDir, isImage, fmtSize, openFile, imagePath, MOD } from "./state.js";
 import { titleRow, closeButton, tiny } from "./ui.js";
 
@@ -11,6 +11,11 @@ const LIMIT = 3000;          // entries listed at most
 const PREVIEW = 400000;      // characters shown at most
 const LANG = { mjs: "js", ts: "js", tsx: "js", jsx: "js", yml: "yaml", jsonc: "json", log: "txt" };
 const icon = (name) => `mods/${MOD}/${name}.svg`;
+const REMOTE_IMAGE = 15 * 1048576; // the largest picture copied over from another machine
+
+// Where a picture from another machine is copied to be drawn: image() loads only
+// files on this Mac. One folder per task, emptied when the dialog closes.
+const previewDir = (id) => `${appHome()}/board/cache/previews/${id}`;
 
 // Every file and folder under dir, relative, with sizes and change times. One
 // `find` per load; it runs on the task's machine.
@@ -39,6 +44,26 @@ function treeOf(entries) {
   for (const list of kids.values()) list.sort((a, b) => (b.dir - a.dir) || a.path.localeCompare(b.path, undefined, { numeric: true }));
   return kids;
 }
+
+// A file's icon and color by its extension: [icon, theme color].
+const TYPES = [
+  [["md", "markdown", "txt", "rst"], "ft-text", "ansi4"],
+  [["json", "jsonc", "json5"], "ft-json", "ansi3"],
+  [["js", "mjs", "cjs", "jsx"], "ft-code", "ansi3"],
+  [["ts", "mts", "cts", "tsx"], "ft-code", "ansi4"],
+  [["rb", "py", "go", "rs", "java", "kt", "swift", "c", "h", "cpp", "php", "lua"], "ft-code", "ansi1"],
+  [["html", "htm", "xml", "svelte", "vue", "hbs"], "ft-code", "ansi1"],
+  [["css", "scss", "sass", "less"], "ft-code", "ansi6"],
+  [["sh", "bash", "zsh", "fish", "log", "out", "err"], "ft-terminal", "ansi2"],
+  [["yml", "yaml", "toml", "ini", "env", "conf", "cfg", "lock"], "ft-config", "ansi5"],
+  [["csv", "tsv", "xlsx", "xls"], "ft-table", "ansi2"],
+  [["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "heic"], "ft-image", "ansi5"],
+  [["mp4", "mov", "webm", "mkv"], "ft-video", "ansi5"],
+  [["zip", "gz", "tgz", "tar", "bz2", "xz", "7z", "rar"], "ft-archive", "muted"],
+  [["diff", "patch"], "ft-code", "ansi6"],
+];
+const TYPE_OF = new Map(TYPES.flatMap(([exts, ic, color]) => exts.map((x) => [x, [ic, color]])));
+const fileType = (path) => TYPE_OF.get(extOf(path)) ?? ["file", "dim"];
 
 const nameOf = (path) => path.split("/").pop();
 const extOf = (path) => (nameOf(path).includes(".") ? nameOf(path).split(".").pop().toLowerCase() : "");
@@ -73,11 +98,15 @@ export class FilesView extends View {
     cx.timer.every(5000, (cx) => this.load(cx, false));
   }
 
+  // Called by Esc and ✕, then by Herdr as the dialog goes: Herdr awaits what it
+  // returns, so the copied pictures are gone before the view is dropped.
   close() {
-    if (this.closed) return;
+    if (this.closed) return this.cleanup;
     this.closed = true;
     this.code?.release();
+    this.cleanup = this.machine && this.id ? exec("rm", ["-rf", previewDir(this.id)]).catch(() => {}) : null;
     closeOverlay(props().overlay);
+    return this.cleanup;
   }
 
   load(cx, first) {
@@ -94,7 +123,9 @@ export class FilesView extends View {
         if (first) {
           // Open the small folders; big ones (screenshots, checks) stay folded.
           for (const e of entries) if (e.dir && (this.kids.get(e.path)?.length ?? 0) <= 12) this.open.add(e.path);
-          const f = firstFile(entries);
+          // A file asked for in props: its folders open too.
+          for (let d = props()?.file ?? ""; d.includes("/");) { d = d.slice(0, d.lastIndexOf("/")); this.open.add(d); }
+          const f = (props()?.file && entries.some((e) => e.path === props().file && !e.dir)) ? props().file : firstFile(entries);
           if (f) this.show(f, cx);
         } else if (this.file) {
           // The shown file changed on disk (an agent wrote it): read it again.
@@ -114,7 +145,7 @@ export class FilesView extends View {
     this.file = path; this.fileError = ""; this.fileAt = entry?.at; this.fileSize = entry?.size;
     if (!this.handle.is_focused()) this.handle.focus();
     cx.notify();
-    if (isImage(path)) return;
+    if (isImage(path)) { if (this.machine) this.fetchImage(path, entry, cx); return; }
     if ((entry?.size ?? 0) > 20 * 1048576) { this.fileError = `Too large to preview (${fmtSize(entry.size)}).`; return; }
     cx.spawn(async (cx) => {
       try {
@@ -135,6 +166,25 @@ export class FilesView extends View {
           }
         }
       } catch (e) { if (this.file === path) this.fileError = `Cannot read this file: ${String(e?.message ?? e)}`; }
+      finally { cx.notify(); }
+    });
+  }
+
+  // Copies a picture from the task's machine to this Mac (base64 through hc, so
+  // the bytes arrive whole), then shows the copy. A changed file gets a new name.
+  fetchImage(path, entry, cx) {
+    if ((entry?.size ?? 0) > REMOTE_IMAGE) { this.fileError = `Too large to copy over for a preview (${fmtSize(entry.size)}). Open it on ${this.machine}.`; return; }
+    const dir = previewDir(this.id);
+    const out = `${dir}/${entry?.at ?? 0}-${path.replace(/[\/\\]/g, "__")}`;
+    if (this.remote?.path === path && this.remote.out === out) return;
+    this.remote = { path, out, ready: false };
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("sh", ["-c", 'mkdir -p "$1" && hc exec --on "$2" --timeout 120 sh -c \'base64 < "$1"\' sh "$3" > "$4.b64" && base64 --decode < "$4.b64" > "$4.part" && [ -s "$4.part" ] && mv -f "$4.part" "$4"; c=$?; rm -f "$4.b64" "$4.part"; exit $c',
+          "sh", dir, this.machine, `${this.root}/${path}`, out], { timeout: 150000 });
+        if (r.code !== 0) throw new Error((r.stderr || "the copy failed").trim().split("\n")[0]);
+        if (this.remote?.out === out) this.remote.ready = true;
+      } catch (e) { if (this.file === path) this.fileError = `Cannot copy this picture from ${this.machine}: ${String(e?.message ?? e)}`; }
       finally { cx.notify(); }
     });
   }
@@ -176,7 +226,8 @@ export class FilesView extends View {
           .when(!on, (el) => el.hover((s) => s.bg(tm.hover)))
           .on_click((_e, cx) => e.dir ? this.toggle(e.path, cx) : this.show(e.path, cx))
           .child(e.dir ? svg(icon(open ? "chevron-down" : "chevron-right")).size(11).flex_none().text_color(tm.dim) : div().w(11).flex_none())
-          .child(svg(icon(e.dir ? "folder" : "file")).size(13).flex_none().text_color(e.dir ? tm.muted : tm.dim))
+          .child(e.dir ? svg(icon("folder")).size(13).flex_none().text_color(tm.muted)
+            : (([ic, color]) => svg(icon(ic)).size(13).flex_none().text_color(tm[color] ?? tm.dim))(fileType(e.path)))
           .child(div().flex_1().min_w(0).truncate().text_color(on ? tm.foreground : tm.muted).child(nameOf(e.path)))
           .when(e.dir, (el) => el.child(div().flex_none().text_size(10.5).text_color(tm.dim).child(String(this.kids.get(e.path)?.length ?? 0)))));
         if (e.dir && open) walk(e.path, depth + 1);
@@ -199,9 +250,12 @@ export class FilesView extends View {
     if (!path) body = div().p(16).text_size(12).text_color(tm.dim).child(this.loading ? "Loading…" : "Choose a file on the left.");
     else if (entry?.dir) body = div().p(16).text_size(12).text_color(tm.dim).child(`${this.kids.get(path)?.length ?? 0} items. Choose a file on the left.`);
     else if (this.fileError) body = div().p(16).text_size(12).text_color(tm.dim).child(this.fileError);
-    else if (isImage(path)) body = local
-      ? div().id("tf-img").flex_1().min_h(0).p(12).flex().items_center().justify_center().overflow_hidden().child(image(imagePath(abs)).size_full())
-      : div().p(16).text_size(12).text_color(tm.dim).child("This image is on another machine: no preview.");
+    else if (isImage(path)) {
+      const src = local ? abs : this.remote?.path === path && this.remote.ready ? this.remote.out : null;
+      body = src
+        ? div().id("tf-img").flex_1().min_h(0).p(12).flex().items_center().justify_center().overflow_hidden().child(image(imagePath(src)).size_full())
+        : div().p(16).text_size(12).text_color(tm.dim).child(`Copying the picture from ${this.machine}…`);
+    }
     else if (this.text === null || this.text === undefined) body = div().p(16).text_size(12).text_color(tm.dim).child("Reading…");
     else if (isMarkdown(path)) body = v_flex().id("tf-md").flex_1().min_h(0).overflow_y_scrollbar().px(18).py(12)
       .child(TextView.markdown(`tf-md-${path}-${this.fileAt ?? 0}`, this.text).selectable(true).scrollable(false));
