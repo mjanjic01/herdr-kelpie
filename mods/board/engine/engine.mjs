@@ -839,6 +839,30 @@ export function codexDefaults(m, base = []) {
   if (/(^|\s)(-s|--sandbox|-a|--ask-for-approval|--full-auto|--dangerously-bypass-approvals-and-sandbox)(\s|=|$)/.test(own)) return [];
   return ["--sandbox", "workspace-write", "--ask-for-approval", "never", "-c", "sandbox_workspace_write.network_access=true"];
 }
+// Claude Code (2.1.326 and later) asks before it uses an --add-dir folder that
+// it does not trust, and the run waits on that prompt with nobody to answer it.
+// The board made the task folders itself, so it trusts their parent once: a
+// trusted folder covers everything below it. Only written when missing, and an
+// unreadable file is left alone.
+export function trustForClaude(folder, file = path.join(process.env.CLAUDE_CONFIG_DIR ?? os.homedir(), ".claude.json")) {
+  if (DRY) return false;
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch (e) { if (e.code !== "ENOENT") return false; text = "{}"; }
+  let conf;
+  try { conf = JSON.parse(text); } catch { return false; }
+  if (!conf || typeof conf !== "object") return false;
+  const projects = (conf.projects ??= {});
+  if (projects[folder]?.hasTrustDialogAccepted === true) return false;
+  projects[folder] = { ...(projects[folder] ?? {}), hasTrustDialogAccepted: true };
+  const tmp = `${file}.${process.pid}.board.tmp`;
+  let mode = 0o600;
+  try { mode = fs.statSync(file).mode & 0o777; } catch {}
+  fs.writeFileSync(tmp, JSON.stringify(conf, null, 2), { mode });
+  fs.renameSync(tmp, file);
+  log(`trusted ${folder} for Claude Code`);
+  return true;
+}
+
 async function argvFor(m, dir) {
   const base = runOf(m.program);
   if (!(await installed(base[0]))) throw new Error(`${settings.programs?.[m.program]?.name ?? m.program} is not installed on ${MACHINE ?? "this machine"}. Install it here, or give ${m.name} another program in Teams.`);
@@ -850,6 +874,10 @@ async function argvFor(m, dir) {
   const cdx = codexDefaults(m, base);
   const heavy = path.join(HOME, "heavy");
   if (cdx.length) fs.mkdirSync(heavy, { recursive: true });
+  const isClaude = m.program === "claude" || /(^|\/)claude$/.test(base[0]);
+  if (dir && isClaude && path.dirname(dir) === TASKS_DIR) {
+    try { trustForClaude(TASKS_DIR); } catch (e) { log(`could not trust ${TASKS_DIR} for Claude Code: ${e.message}`); }
+  }
   return [...base, ...(m.model ? ["--model", m.model] : []), ...cdx, ...(cdx.length ? ["--add-dir", heavy] : []), ...(dir && addDir ? ["--add-dir", dir] : []), ...(m.args ?? [])];
 }
 

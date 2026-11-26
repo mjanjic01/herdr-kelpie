@@ -421,3 +421,27 @@ test("a board is forgotten only when its folder is gone long enough, unused and 
   assert.deepEqual(staleBoards(boards, tasks, spaces, gone, now), ["a", "d"]);
   assert.deepEqual(staleBoards(boards, [], {}, {}, now), []);
 });
+
+test("the task folder is trusted for Claude Code once, keeping the rest of its config", async () => {
+  const { trustForClaude } = await import("./engine.mjs");
+  const fsx = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const tmp = fsx.mkdtempSync(path.join(os.tmpdir(), "trust-"));
+  try {
+    const file = path.join(tmp, ".claude.json");
+    fsx.writeFileSync(file, JSON.stringify({ keep: 1, projects: { "/x/tasks": { allowedTools: ["a"] } } }), { mode: 0o600 });
+    assert.equal(trustForClaude("/x/tasks", file), true);
+    const conf = JSON.parse(fsx.readFileSync(file, "utf8"));
+    assert.deepEqual(conf, { keep: 1, projects: { "/x/tasks": { allowedTools: ["a"], hasTrustDialogAccepted: true } } });
+    assert.equal(fsx.statSync(file).mode & 0o777, 0o600);
+    assert.equal(trustForClaude("/x/tasks", file), false);
+    fsx.writeFileSync(file, "{ not json");
+    assert.equal(trustForClaude("/x/tasks", file), false);
+    assert.equal(fsx.readFileSync(file, "utf8"), "{ not json");
+    const fresh = path.join(tmp, "none", ".claude.json");
+    fsx.mkdirSync(path.dirname(fresh));
+    assert.equal(trustForClaude("/y", fresh), true);
+    assert.deepEqual(JSON.parse(fsx.readFileSync(fresh, "utf8")), { projects: { "/y": { hasTrustDialogAccepted: true } } });
+  } finally { fsx.rmSync(tmp, { recursive: true, force: true }); }
+});
