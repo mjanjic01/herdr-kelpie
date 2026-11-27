@@ -93,7 +93,9 @@ export async function loadStates() {
   let changed = false;
   for (const [k, seq] of Object.entries(seqs)) {
     if (mem[k]?.seq === seq) continue;
-    try { mem[k] = { seq, st: JSON.parse(await readTextFile(await stateFile(k))) }; changed = true; gen++; } catch {}
+    // fs, not readTextFile: readTextFile refuses files over 1 MiB, and a busy
+    // machine's state.json grows past that.
+    try { mem[k] = { seq, st: JSON.parse(await fs.readFile(await stateFile(k), "utf8")) }; changed = true; gen++; } catch {}
   }
   return changed;
 }
@@ -662,12 +664,14 @@ export async function poll() {
       const home = await homeOn(machine);
       const seq = ((await readTextFile(`${home}/seq`, { on: machine })) ?? "").trim();
       if (!seq || seq === seqs[k]) continue;
-      const text = await readTextFile(`${home}/state.json`, { on: machine });
-      const st = JSON.parse(text);
+      // readTextFile refuses files over 1 MiB, so another machine's state.json
+      // is copied by the shell into the cache, then read with fs.
       if (machine) {
         await fs.mkdir(`${appHome()}/board/cache`, { recursive: true }).catch(() => {});
-        await fs.writeFile(cacheFile(k), text);
+        const c = await exec("sh", ["-c", 'hc exec --on "$1" cat "$2" > "$3.tmp" && mv -f "$3.tmp" "$3"', "sh", machine, `${home}/state.json`, cacheFile(k)], { timeout: 60000 });
+        if (c.code !== 0) throw new Error(`state.json from ${machine}: ${(c.stderr || c.stdout).trim()}`);
       }
+      const st = JSON.parse(await fs.readFile(machine ? cacheFile(k) : `${home}/state.json`, "utf8"));
       seqs[k] = seq;
       fresh[k] = st;
     } catch {}
