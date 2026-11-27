@@ -5,47 +5,16 @@
 // board by itself a minute after its folder goes; one with tasks waits here.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, props, closeOverlay, run, home, notify, panes, exec } from "herdr";
+import { theme, props, closeOverlay, run, home, notify, panes } from "herdr";
 import { MOD, COLUMNS, served, stateOf, tasks, activeRun, spaces, qual, request, teamsOf } from "./state.js";
 import { tiny, chips, section, titleRow, closeButton, dot } from "./ui.js";
+import { worktreesOf, dropWorktree, closeSpacesIn } from "./worktrees.js";
 
 const short = (folder) => { const h = home(); return h && folder.startsWith(h + "/") ? `~${folder.slice(h.length)}` : folder; };
 const base = (p) => p.split("/").pop() || p;
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const removeLabel = (tasks, wts) => !tasks ? "Remove board" : wts ? `Remove board, ${plural(tasks, "task")} and ${plural(wts, "worktree")}` : `Remove board and ${plural(tasks, "task")}`;
 
-// ---- the task worktrees a board removal takes with it ----
-// The engine's board-remove keeps them; the window removes them first, on the
-// board's machine. Their branches stay.
-async function git(machine, cwd, args) {
-  const r = await exec("git", args, { cwd, on: machine, timeout: 120000 });
-  return { ok: r.code === 0, out: (r.stdout ?? "").trim(), err: (r.stderr || r.stdout || "").trim() };
-}
-// Each task worktree that is still on disk: { path, repo, branch, dirty }.
-async function worktreesOf(machine, mine) {
-  const out = [];
-  for (const t of mine) {
-    const wt = t.worktree;
-    if (!wt?.path) continue;
-    const here = await exec("test", ["-d", wt.path], { on: machine }).then((r) => r.code === 0, () => false);
-    if (!here) continue;
-    let dirty = false;
-    try { dirty = (await git(machine, wt.path, ["--no-optional-locks", "status", "--porcelain"])).out !== ""; } catch {}
-    out.push({ path: wt.path, repo: wt.repo ?? null, branch: wt.branch ?? null, dirty });
-  }
-  return out;
-}
-// Removes one worktree, changes and locks included. Returns an error or null.
-async function dropWorktree(machine, wt) {
-  let last = null;
-  for (const cwd of [wt.repo, wt.path].filter(Boolean)) {
-    let r;
-    try { r = await git(machine, cwd, ["worktree", "remove", "-f", "-f", wt.path]); } catch (e) { last = String(e?.message ?? e); continue; }
-    if (r.ok || /is not a working tree|does not exist/.test(r.err)) return null;
-    last = r.err || "git worktree remove failed.";
-  }
-  return last;
-}
 
 export class BoardsView extends View {
   init(_props, cx) {
@@ -113,8 +82,7 @@ export class BoardsView extends View {
         }
       }
       // Spaces in a task worktree ("Unblock in tab" makes them) close with it.
-      const inside = (f) => wts.some((w) => f === w.path || String(f ?? "").startsWith(w.path + "/"));
-      for (const s of spaces().filter((s) => (s.machine ?? null) === machine && inside(s.folder))) run("space.close", { id: s.id, confirmed: true });
+      closeSpacesIn(machine, wts);
       this.busy = key;
       this.error = "";
       cx.notify();

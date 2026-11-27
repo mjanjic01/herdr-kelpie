@@ -2,12 +2,13 @@
 // history, runs and the actions the person takes on it.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, TextView } from "gpui-base";
-import { theme, spaces, props, closeOverlay, openOverlay, run, exec, settings } from "herdr";
+import { theme, spaces, props, closeOverlay, openOverlay, run, exec, settings, notify } from "herdr";
 import { boardMates, depsOpen, DEP_DONE, depLoops, MOD, unblockInTab, COLUMNS, tasks, task, team, member, column, activeRun, liveStatus, runStatus, runLimit, updateTask, newTask, removeTask, removeTaskDir, where, launch, restart, endRun, tidy, goTo, paneOf, isLive, leftOver, nudge, reply, place, taskDir, knownNow, programs, ago, uid, attachments, copyIn, attach, detach, filesDir, pickFiles, openFile, removeWorktree, ctxOfTask, boardOfSpace, fileOf, homeNow, attachmentSrc } from "./state.js";
 import { button, tiny, label, field, fileChip, memberChip, programIcon, statusGlyph, STATUS_WORDS, section, chips, titleRow, closeButton, colorOf, dot } from "./ui.js";
 import { MarkdownEditor } from "./mdeditor.js";
 import { TextBlocks } from "./textblock.js";
 import { limitLine } from "./limit.js";
+import { worktreesOf, dropWorktree, closeSpacesIn } from "./worktrees.js";
 
 const DROP_HINT = "Drop files onto this dialog to attach them.";
 
@@ -209,6 +210,20 @@ export class TaskView extends View {
     this.run(cx, async () => { await done; this.text.refresh({ desc: task(this.id)?.description ?? "" }); if (andStart) await launch(task(this.id)); });
   }
 
+  // The first Delete: looks for the task's worktree on its machine.
+  askDelete(t, cx) {
+    this.confirmDelete = true;
+    this.wtCheck = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let wts = [];
+      let error = null;
+      try { wts = await worktreesOf(t.machine ?? null, [t]); } catch (e) { error = String(e?.message ?? e); }
+      this.wtCheck = { wts: error ? [] : wts, error };
+      cx.notify();
+    });
+  }
+
   run(cx, work) {
     if (this.busy) return;
     this.busy = true; this.error = "";
@@ -397,11 +412,26 @@ export class TaskView extends View {
       .child(button("edit", "Edit", (_e, cx) => { this.editing = true; this.title.set_value(t.title); this.desc.setValue(t.description ?? ""); this.hint = ""; this.draft = { ...this.draft, title: t.title, description: t.description ?? "", space: t.space, assignee: t.assignee, column: t.column, dependsOn: [...(t.dependsOn ?? [])] }; cx.notify(); this.title.focus(); }))
       .when((t.runs ?? []).some(leftOver), (el) => el.child(button("tidy", "Close finished runs", (_e, cx) => this.run(cx, () => tidy(task(t.id))))))
       .child(div().flex_1())
-      .child(button("delete", this.confirmDelete ? "Really delete" : "Delete", (_e, cx) => {
-        if (!this.confirmDelete) { this.confirmDelete = true; cx.notify(); return; }
+      .child(button("delete", !this.confirmDelete ? "Delete" : !this.wtCheck ? "Checking…" : this.wtCheck.wts.length ? "Delete task and worktree" : "Really delete", (_e, cx) => {
+        if (!this.confirmDelete) { this.askDelete(t, cx); return; }
+        const wts = this.wtCheck?.wts ?? [];
+        const machine = t.machine ?? null;
+        // The task first: the engine ends its run, which frees the worktree.
         // Wait for the engine: closing first cancels a remote send before it is written.
-        this.run(cx, async () => { await removeTask(t.id); this.close(); });
-      }, { danger: true, disabled: this.busy }));
+        this.run(cx, async () => {
+          await removeTask(t.id);
+          closeSpacesIn(machine, wts);
+          for (const w of wts) {
+            const err = await dropWorktree(machine, w);
+            if (err) notify({ title: "Worktree not removed", body: `${w.path}: ${err}`.slice(0, 300), level: "error", timeout: 12000 });
+          }
+          this.close();
+        });
+      }, { danger: true, disabled: this.busy || (this.confirmDelete && !this.wtCheck) }));
+    const wtLine = !this.confirmDelete || !this.wtCheck ? null
+      : this.wtCheck.error ? `Could not check its worktree: ${this.wtCheck.error}. Delete keeps it.`
+      : this.wtCheck.wts.some((w) => w.dirty) ? `Its worktree ${this.wtCheck.wts[0].path.split("/").pop()} goes too, and its uncommitted changes will be lost. The branch stays.`
+      : this.wtCheck.wts.length ? `Its worktree ${this.wtCheck.wts[0].path.split("/").pop()} goes too. The branch stays.` : null;
     const picker = this.pick === "assign"
       ? chips("pa", team().map((x) => ({ id: x.id, label: `${x.name} · ${x.role}`, color: x.color })), t.assignee, (id, cx) => {
           this.pick = null; this.run(cx, () => updateTask(t.id, { assignee: id }));
@@ -460,7 +490,8 @@ export class TaskView extends View {
         }))
         .when(!hist.length, (el) => el.child(div().text_size(12).text_color(tm.dim).child("Nothing yet."))))
       .when(Boolean(picker), (el) => el.child(div().pt(10).child(picker)))
-      .child(div().pt(12).child(actions));
+      .child(div().pt(12).child(actions))
+      .when(Boolean(wtLine), (el) => el.child(div().pt(6).text_size(11.5).text_color(tm.blocked).child(wtLine)));
   }
 
   render(cx) {
