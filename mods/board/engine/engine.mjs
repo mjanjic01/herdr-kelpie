@@ -533,7 +533,7 @@ export const DEFAULT_ENV_NOTES = [
   "- The shell is zsh: quote globs (`--include='*.tsx'`) and avoid a bare `=word`.",
   "- Before you write your result, run `agent-browser close` if you used it, and close the pages that you opened through your browser tools. The board also closes your browsers after your result.",
   "- Never open links, files or artifacts in a desktop app on this machine (Safari, Preview, `open <url>`). Use only your own Chrome through the browser tools.",
-  "- Run any browser, e2e or Playwright suite through `\"$BOARD_HEAVY\"` (the board's `board-heavy`) with `--workers=$BOARD_WORKERS` (the board's \"Browsers per test run\": how many browsers one run may open at once), for example `\"$BOARD_HEAVY\" npm run test:acceptance -- --workers=$BOARD_WORKERS`. It waits for this machine's browser slot, so suites never run side by side, and runs at low priority.",
+  "- Run any browser, e2e or Playwright suite through `\"$BOARD_HEAVY\"` (the board's `board-heavy`) with `--workers=$BOARD_WORKERS` (the board's \"Browsers per test run\": how many browsers one run may open at once), for example `\"$BOARD_HEAVY\" <your test command> --workers=$BOARD_WORKERS`. It waits for this machine's browser slot, so suites never run side by side, and runs at low priority.",
 ].map((l) => PF.envNote(l, SHELL)).join("\n"); // Linux: the shell and opener of this machine
 const DEFAULT_BOARD = { pickup: false, worktrees: true, setup: "", envNotes: DEFAULT_ENV_NOTES, standing: "", workers: 4 };
 
@@ -692,7 +692,7 @@ async function repoOf(folder) {
 // not again within FETCH_FRESH: tasks started together share one fetch.
 const FETCH_FRESH = 120000;
 const fetchedAt = {}; // "<repo> <branch>" -> when it was last fetched
-async function baseRef(top) {
+export async function baseRef(top) {
   if (!(await git(top, ["remote", "get-url", "origin"])).ok) return "HEAD";
   let head = (await git(top, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).out;
   if (!head) for (const b of ["origin/main", "origin/master"]) if ((await git(top, ["rev-parse", "--verify", "--quiet", b])).ok) { head = b; break; }
@@ -702,13 +702,24 @@ async function baseRef(top) {
     for (const b of ["origin/main", "origin/master"]) if ((await git(top, ["rev-parse", "--verify", "--quiet", b])).ok) { head = b; break; }
     return head || "HEAD";
   }
-  const name = head.replace(/^origin\//, "");
-  const key = `${top} ${name}`;
-  if (Date.now() - (fetchedAt[key] ?? 0) > FETCH_FRESH) {
+  const fetchBranch = async (ref) => {
+    const name = ref.replace(/^origin\//, "");
+    const key = `${top} ${name}`;
+    if (Date.now() - (fetchedAt[key] ?? 0) <= FETCH_FRESH) return true;
     const fetched = (await run("git", ["-C", top, "fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${name}:refs/remotes/origin/${name}`], { timeout: 120000 })).code === 0;
     if (fetched) fetchedAt[key] = Date.now();
-    else log("fetch failed in", top, "; branching from the last fetched", head);
+    return fetched;
+  };
+  if (await fetchBranch(head)) return head;
+  // The remote's default branch may have changed (master to develop): ask the
+  // remote again, fetch the new one and remember it as origin/HEAD.
+  const remoteHead = (await run("git", ["-C", top, "ls-remote", "--symref", "origin", "HEAD"], { timeout: 60000 })).stdout?.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1];
+  if (remoteHead && `origin/${remoteHead}` !== head && await fetchBranch(`origin/${remoteHead}`)) {
+    await git(top, ["symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${remoteHead}`]);
+    log("default branch of", top, "is now", `origin/${remoteHead}`, "(was", head + ")");
+    return `origin/${remoteHead}`;
   }
+  log("fetch failed in", top, "; branching from the last fetched", head);
   return head;
 }
 const branchOf = async (folder) => (await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"])).out || null;

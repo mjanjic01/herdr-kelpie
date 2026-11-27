@@ -167,7 +167,7 @@ ways:
   under `nice -n 10` (the machine setting `niceness`, 0 turns it off). The
   machine stays responsive to ssh and the network.
 - **Browser slots.** Run a suite through `"$BOARD_HEAVY"`, the board's
-  `board-heavy` script (in `bin/` here): `"$BOARD_HEAVY" npm run test:e2e --
+  `board-heavy` script (in `bin/` here): `"$BOARD_HEAVY" <your test command>
   --workers=$BOARD_WORKERS`. It waits until one of the machine's slots is free
   (the machine setting `heavySlots`, default 1), runs the suite at low
   priority, and frees the slot when it ends. While it waits, the task's card

@@ -422,6 +422,32 @@ test("a board is forgotten only when its folder is gone long enough, unused and 
   assert.deepEqual(staleBoards(boards, [], {}, {}, now), []);
 });
 
+import { baseRef } from "./engine.mjs";
+
+test("baseRef follows a remote whose default branch moved from master to develop", async () => {
+  const tmp = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "base-"));
+  const g = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { stdio: "pipe" }).toString().trim();
+  try {
+    const origin = pathx.join(tmp, "origin.git"), seed = pathx.join(tmp, "seed"), repo = pathx.join(tmp, "repo");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "master", origin]);
+    execFileSync("git", ["init", "-q", "-b", "master", seed]);
+    g(seed, "commit", "-q", "--allow-empty", "-m", "root");
+    g(seed, "remote", "add", "origin", origin);
+    g(seed, "push", "-q", "origin", "master");
+    execFileSync("git", ["clone", "-q", origin, repo]);
+    assert.equal(g(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"), "origin/master");
+    // The remote renames its default branch; this clone still remembers master.
+    g(seed, "checkout", "-q", "-b", "develop");
+    g(seed, "commit", "-q", "--allow-empty", "-m", "on develop");
+    g(seed, "push", "-q", "origin", "develop");
+    g(origin, "symbolic-ref", "HEAD", "refs/heads/develop");
+    g(seed, "push", "-q", "origin", "--delete", "master");
+    assert.equal(await baseRef(repo), "origin/develop");
+    assert.equal(g(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"), "origin/develop");
+    assert.equal(g(repo, "log", "-1", "--format=%s", "origin/develop"), "on develop");
+  } finally { fsx.rmSync(tmp, { recursive: true, force: true }); }
+});
+
 test("the task folder is trusted for Claude Code once, keeping the rest of its config", async () => {
   const { trustForClaude } = await import("./engine.mjs");
   const fsx = await import("node:fs");
