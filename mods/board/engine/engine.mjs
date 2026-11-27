@@ -657,10 +657,25 @@ function updateTask(id, patch) {
   dirty = true;
 }
 const hist = (t, text, memberId = null) => [...(t.history ?? []), { at: Date.now(), member: memberId, text }];
-const activeRun = (t) => [...(t.runs ?? [])].reverse().find((r) => !r.ended && !r.result) ?? null;
+export const activeRun = (t) => [...(t?.runs ?? [])].reverse().find((r) => !r.ended && !r.result) ?? null;
+// A run that no longer belongs to the task: its member is not the assignee any
+// more (an assign, or a hand-off by hand), or the task left In progress for
+// Backlog or To do. It must end, or it keeps its member's slot and blocks the
+// next start.
+export function staleRun(t) {
+  const r = activeRun(t);
+  if (!r) return null;
+  if (t.assignee && r.member !== t.assignee) return r;
+  if (t.column === "backlog" || t.column === "todo") return r;
+  return null;
+}
 // Room counts per board: a member's tasks on that board only.
 const capacityOf = (m) => Math.max(1, Math.floor(Number(m?.capacity) || 1));
-const busyCount = (board, id) => tasks.filter((t) => t.board === board && activeRun(t)?.member === id).length;
+// A run that waits for the person's answer to its "blocked" result does not
+// take a slot: its member takes other work meanwhile. After the answer the
+// member can be over capacity for a while.
+export const holdsSlot = (r) => Boolean(r) && !(r.blocked && !r.blockAnswered);
+const busyCount = (board, id) => tasks.filter((t) => t.board === board && activeRun(t)?.member === id && holdsSlot(activeRun(t))).length;
 const hasRoom = (m, board) => Boolean(m) && busyCount(board, m.id) < capacityOf(m);
 const taskDir = (t) => t.dir ?? path.join(TASKS_DIR, t.id);
 const resultFile = (t, r) => `${taskDir(t)}/result.${r.id}.json`;
@@ -790,14 +805,26 @@ function firstSentence(text) {
   const line = lines.find((l) => !l.startsWith("#")) ?? lines[0] ?? "";
   return line.replace(/^(#+|[-*>]|\d+\.)\s*/, "").replace(/\*\*|`/g, "").replace(/(^|\s)_+|_+(?=[\s.,;:!?)]|$)/g, "$1").split(/(?<=\.)\s/)[0];
 }
+// The team's Planner: the first member whose role says so. Every other member
+// may hand a task back to it for a decision, whatever its own hand-off list says.
+export const plannerOf = (members) => members.find((x) => /planner/i.test(x.role ?? "")) ?? null;
+export function handoffTargets(m, members) {
+  const find = (ref) => members.find((x) => x.id === ref || x.name.toLowerCase() === String(ref).toLowerCase()) ?? null;
+  const out = (m.handoffs ?? []).map(find).filter(Boolean);
+  const p = plannerOf(members);
+  if (p && p.id !== m.id && !out.includes(p)) out.push(p);
+  return out;
+}
 function composeBrief(t, m, dir, folder, result) {
-  const can = (m.handoffs ?? []).map((id) => member(id, t)).filter(Boolean);
+  const can = handoffTargets(m, membersOf(t));
   const names = can.map((x) => `${x.name} (${x.role})`);
+  const planner = plannerOf(membersOf(t));
   const lines = [];
   lines.push(`# You are ${m.name}, the ${m.role}`, "", String(m.brief ?? "").trim(), "");
   lines.push("# The team", "");
   for (const x of membersOf(t)) lines.push(`- ${x.name}, ${x.role}${x.id === m.id ? " (you)" : ""}: ${firstSentence(x.brief)}`);
   lines.push("", can.length ? `You may hand off to: ${names.join(", ")}.` : "You cannot hand off to anyone: finish the task or report blocked.", "");
+  if (planner && planner.id !== m.id) lines.push(`If the task needs a decision about its plan (a decision gate, a change of scope or approach), hand off to ${planner.name} (${planner.role}) with the question in "summary".`, "");
   lines.push(`# Task: ${t.title}`, "", (t.description || "(no description)").trim(), "");
   if (t.attachments?.length) {
     lines.push("# Attachments", "", "Files the person attached to this task. Read them. Images and PDFs can be viewed.", "");
@@ -829,7 +856,7 @@ function composeBrief(t, m, dir, folder, result) {
   lines.push('- "done": the whole task is finished and ready for the person to review.');
   lines.push('- "blocked": you need the person. Put your question in "summary" and wait in this terminal for their answer; after it, continue and write the same file again.');
   lines.push("");
-  lines.push(`Write longer notes (plans, findings) as markdown files in ${dir} and name them in "summary". Do not start other agents. Stay in this terminal after writing the result: the person may ask you follow-up questions here.`);
+  lines.push(`Write longer notes (plans, findings) as markdown files in ${dir} and name them in "summary". Do not start other agents. Stay in this terminal after writing the result: the person may ask you follow-up questions here. After a hand-off, the board closes this session once it is idle for 15 minutes.`);
   lines.push("", "If you hit a usage limit, stop and wait for it to reset; do not hand off unfinished work. A check that runs for a long time may run in the background: wait for it and read its result before you hand off.");
   return lines.join("\n") + "\n";
 }
@@ -1028,11 +1055,14 @@ function killRun(r) {
   if (!r?.terminal || r.terminal.includes("/")) return;
   run(HC, ["kill", r.terminal]).then(() => (inPane(r) ? null : run(HC, ["rm", r.terminal]))).catch(() => {});
 }
+// Every stop ends the agent's session. `how` is only the word the card shows
+// ("stopped", or a reason a request gave): a stop with a reason of its own
+// used to leave the agent running, with nobody to close it.
 function endRun(taskId, runId, how) {
   const t = task(taskId);
   const r = t?.runs?.find((x) => x.id === runId);
-  if (!r) return;
-  if (how === "stopped") killRun(r);
+  if (!r || r.ended || r.result) return;
+  killRun(r);
   updateTask(taskId, (cur) => ({ ...cur, updated: Date.now(), runs: cur.runs.map((x) => (x.id === runId ? { ...x, ended: x.ended ?? Date.now(), exit: how } : x)) }));
 }
 
@@ -1597,8 +1627,13 @@ async function pickUp() {
 
 // An In progress task with an assignee, no run, no note and not waiting is a
 // hand-off that never started (an engine restart, a move by hand): it waits
-// for its member like any hand-off.
-export const stranded = (t, active = activeRun(t)) => t.column === "doing" && Boolean(t.assignee) && !active && !t.attention && !t.queued && t.autopilot !== false;
+// for its member like any hand-off. A task whose last run ended without a
+// result (stopped by the person or a request, reassigned, gone) is not one:
+// it waits for a Start or a move.
+// Before, a stop right after a reply (which clears the note) restarted the
+// member within a second.
+const lastRunUnfinished = (t) => { const last = (t.runs ?? []).at(-1); return Boolean(last && last.ended && !last.result); };
+export const stranded = (t, active = activeRun(t)) => t.column === "doing" && Boolean(t.assignee) && !active && !t.attention && !t.queued && t.autopilot !== false && !lastRunUnfinished(t);
 function strandedHandoffs() {
   for (const t of tasks) {
     if (!stranded(t)) continue;
@@ -1611,15 +1646,20 @@ function strandedHandoffs() {
 // Sessions of finished runs that sit idle: closed after IDLE_CLOSE_MS. Never a
 // run in a pane the person kept, never one that works or waits for the person.
 const IDLE_CLOSE_MS = 15 * 60000;
-// A finished run's idle session closes when the same member finished a later
-// run of the task (only each member's last session stays to ask), or when the
-// task has sat in Review or Done for `doneMinutes` (machine setting
-// cleanupDone, default 30; 0 = never).
+// An idle session closes, in any column, when its run handed off (the next
+// member has the task and the notes are in the task folder) or ended without a
+// result (stopped, reassigned). A run that finished the task ("done") keeps
+// its session to ask until the task has sat in Review or Done for
+// `doneMinutes` (machine setting cleanupDone, default 30; 0 = never), or the
+// same member finished a later run.
 export function closable(t, r, k, now = Date.now(), doneMinutes = 30) {
-  if (!r?.result || r.closed || !k || k.state !== "live") return false;
+  if (!(r?.result || r?.ended) || r.closed || !k || k.state !== "live") return false;
   if (k.labels?.["herdr.tab"]) return false;
   if (k.status !== "idle" && k.status !== "done") return false;
   if (!(r.idleAt != null && now - r.idleAt > IDLE_CLOSE_MS)) return false;
+  if (!r.result) return true;
+  // A hand-off: the next member has the task, and the notes are in the task folder.
+  if (r.result.action === "handoff") return true;
   const runs = t.runs ?? [];
   const later = runs.slice(runs.findIndex((x) => x.id === r.id) + 1).some((x) => x.member === r.member && x.result);
   if (later) return true;
@@ -1632,7 +1672,7 @@ function closeIdle() {
   const now = Date.now();
   for (const t of tasks) {
     for (const r of t.runs ?? []) {
-      if (!r.result || r.closed || !r.terminal || r.terminal.includes("/")) continue;
+      if (!(r.result || r.ended) || r.closed || !r.terminal || r.terminal.includes("/")) continue;
       const k = term(r.terminal);
       const idle = k && k.state === "live" && (k.status === "idle" || k.status === "done");
       const idleAt = idle ? (r.idleAt ?? now) : null;
@@ -1842,6 +1882,33 @@ async function startIfAsked(id) {
   return { started: true };
 }
 
+// After an assign or a move: ends a run that no longer belongs to the task
+// (staleRun), so its member's slot is free, and drops the note it left. A task
+// in Backlog or To do with no run keeps no note of an ended run either.
+// Returns { ended: name } or { busy: name } (a working run, left alone), or {}.
+function release(id, from) {
+  const t = task(id);
+  if (!t) return {};
+  const r = staleRun(t);
+  if (!r) {
+    if ((t.column === "backlog" || t.column === "todo") && t.attention && lastRunUnfinished(t)) updateTask(id, { attention: null });
+    return {};
+  }
+  const name = member(r.member, t)?.name ?? "Someone";
+  // A working agent goes on: only a run that is blocked, idle or gone ends.
+  if (!releasable(runStatus(r))) return { busy: name };
+  const parked = t.column === "backlog" || t.column === "todo";
+  endRun(id, r.id, parked ? `moved to ${colName(t.column)}` : "reassigned");
+  const why = parked ? `the task went to ${colName(t.column)}` : `the task was assigned to ${member(t.assignee, t)?.name ?? "someone else"}`;
+  updateTask(id, (cur) => ({ ...cur, attention: null, queued: false, updated: Date.now(), history: hist(cur, `${name}'s run ended: ${why} (by ${from})`, r.member) }));
+  return { ended: name };
+}
+// The statuses a stale run may be ended in: waiting for the person, idle, or
+// no live terminal. Working, limited (continues by itself) and waiting (on its
+// own command) go on.
+export const releasable = (st) => st == null || st === "idle" || st === "done" || st === "blocked";
+const stillOn = (name, st) => `${name} is still on it (${st ?? "running"}): that run goes on until it ends or you stop it.`;
+
 // Fields the screen may change on a task.
 const EDITABLE = ["title", "description", "assignee", "column", "attention", "autopilot", "attachments", "queued", "dependsOn"];
 
@@ -1890,17 +1957,29 @@ const OPS = {
     if (!m) throw new Error("assign needs an assignee.");
     const flagged = t.attention && /^Assign someone/.test(t.attention);
     updateTask(t.id, (cur) => ({ ...cur, assignee: m.id, ...(flagged ? { attention: null } : {}), updated: Date.now(), history: hist(cur, `${from} assigned ${m.name}`) }));
-    return { id: t.id, assignee: m.name };
+    // The previous member's run ends, and in doing the new assignee starts.
+    const { ended, busy } = release(t.id, from);
+    let start = { started: false };
+    if (busy) start.warning = stillOn(busy, runStatus(activeRun(task(t.id))));
+    if (task(t.id).column === "doing" && !activeRun(task(t.id))) {
+      try { start = await startIfAsked(t.id); }
+      catch (e) { updateTask(t.id, { attention: `Could not start ${m.name}: ${e?.message ?? e}` }); return { id: t.id, assignee: m.name, ...(ended ? { ended } : {}), started: false, warning: String(e?.message ?? e) }; }
+    }
+    return { id: t.id, assignee: m.name, ...(ended ? { ended } : {}), started: start.started, ...(start.warning ? { warning: start.warning } : {}) };
   },
   async move(req, _s, from) {
     const t = own(req.id);
     const column = columnOf(req.column);
     if (!column) throw new Error("move needs a column.");
     updateTask(t.id, (cur) => ({ ...cur, column, queued: column === "doing" ? cur.queued : false, updated: Date.now(), history: hist(cur, `${from} moved it to ${COLUMNS.find((c) => c.id === column).name}`) }));
+    const { ended } = release(t.id, from);
     let start = { started: false };
     try { start = await startIfAsked(t.id); }
     catch (e) { updateTask(t.id, { attention: `Could not start: ${e?.message ?? e}` }); return { id: t.id, column, started: false, warning: String(e?.message ?? e) }; }
-    return { id: t.id, column: task(t.id).column, started: start.started, ...(start.warning ? { warning: start.warning } : {}) };
+    // A run still on it (the assignee's own, blocked or working): say so, not a silent started:false.
+    const on = !start.started && column !== "review" && column !== "done" ? activeRun(task(t.id)) : null;
+    const warning = start.warning ?? (on ? stillOn(member(on.member, t)?.name ?? "Someone", runStatus(on)) : null);
+    return { id: t.id, column: task(t.id).column, ...(ended ? { ended } : {}), started: start.started, ...(warning ? { warning } : {}) };
   },
   // ---- the screen's task ops ----
   async update(req) {
@@ -1916,6 +1995,17 @@ const OPS = {
       if (t.attention && /^Assign someone/.test(t.attention) && !("attention" in patch)) patch.attention = null;
     }
     updateTask(t.id, patch);
+    // A new assignee or column from the screen: a run that no longer belongs
+    // ends. When that hands a doing task to someone else, they start.
+    let ended = null;
+    if ("assignee" in patch || "column" in patch) {
+      ended = release(t.id, "the person").ended ?? null;
+      const cur = task(t.id);
+      if (ended && cur.column === "doing" && !activeRun(cur)) {
+        try { await startIfAsked(t.id); }
+        catch (e) { updateTask(t.id, { attention: `Could not start: ${e?.message ?? e}` }); }
+      }
+    }
     // Moved into doing by an edit: blocked by its dependencies, it waits.
     if (patch.column === "doing" && blockedBy(task(t.id), tasks).length && !activeRun(task(t.id))) updateTask(t.id, (cur) => ({ ...cur, queued: true }));
     return { id: t.id, ...(blockedBy(task(t.id), tasks).length ? { waiting: depsText(blockedBy(task(t.id), tasks)) } : {}) };

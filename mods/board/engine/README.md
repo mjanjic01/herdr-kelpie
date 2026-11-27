@@ -115,7 +115,26 @@ A new folder gets a new board, with the first team in the library.
 {"op": "note", "id": "k1a2b3c4d5e6", "text": "The API key is in 1Password."}
 ```
 
-A move to `doing` starts the assignee under the same rules as a create. A task
+If the previous member's run is blocked, idle or gone, an `assign` to someone
+else ends that run. If the task is in `doing`, the new assignee starts. A
+move to `backlog` or `todo` ends such a run too and clears its note. The answer
+names the member whose run ended in `ended`. A working run goes on, and the
+answer's `warning` says so.
+
+A run that waits for the person's answer to its question does not count toward
+its member's "Tasks at once". The member takes other work meanwhile.
+
+Every member can hand a task back to the team's Planner for a decision. The
+Planner does not have to be in the member's own hand-off list. After a
+hand-off, the engine closes the member's session once it is idle for 15 minutes.
+
+A `stop` (`{"op": "stop", "id": "…", "how": "a reason"}`) ends the run and
+its session. The task then waits for a Start or a move: the engine does not
+start the member again by itself.
+
+A move to `doing` starts the assignee under the same rules as a create. If the
+assignee's own run is still on the task, nothing starts and the answer's
+`warning` says so. A task
 whose dependencies are not in `review` or `done` yet waits instead: the answer
 says what it waits for, and it starts by itself once they are. Change its
 dependencies with `{"op": "update", "id": "…", "patch": {"dependsOn": ["k…"]}}`.

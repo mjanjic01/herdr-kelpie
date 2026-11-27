@@ -347,9 +347,9 @@ test("agent-browser: stop a daemon and its Chrome, never a reused pid or someone
 test("a member's earlier idle session closes once the member finished a later run", () => {
   const now = 10_000_000;
   const k = { state: "live", status: "done", labels: {} };
-  const r1 = { id: "r1", member: "bo", result: { action: "handoff" }, idleAt: now - 16 * 60000 };
-  const r2 = { id: "r2", member: "cy", result: { action: "handoff" }, idleAt: now - 16 * 60000 };
-  const r3 = { id: "r3", member: "bo", result: { action: "handoff" }, idleAt: now - 16 * 60000 };
+  const r1 = { id: "r1", member: "bo", result: { action: "done" }, idleAt: now - 16 * 60000 };
+  const r2 = { id: "r2", member: "cy", result: { action: "done" }, idleAt: now - 16 * 60000 };
+  const r3 = { id: "r3", member: "bo", result: { action: "done" }, idleAt: now - 16 * 60000 };
   const t = { column: "doing", runs: [r1, r2, r3] };
   assert.equal(closable(t, r1, k, now), true);
   assert.equal(closable(t, r2, k, now), false);
@@ -357,6 +357,18 @@ test("a member's earlier idle session closes once the member finished a later ru
   assert.equal(closable({ ...t, runs: [r1, r2, { ...r3, result: null }] }, r1, k, now), false);
   assert.equal(closable(t, { ...r1, idleAt: now - 5 * 60000 }, k, now), false);
   assert.equal(closable(t, r1, { ...k, status: "working" }, now), false);
+});
+
+test("a session whose run handed off closes after 15 idle minutes, in any column", () => {
+  const now = 10_000_000;
+  const k = { state: "live", status: "idle", labels: {} };
+  const ana = { id: "r1", member: "ana", result: { action: "handoff", to: "greg" }, ended: now - 20 * 60000, idleAt: now - 16 * 60000 };
+  const t = { column: "doing", runs: [ana, { id: "r2", member: "greg" }] };
+  assert.equal(closable(t, ana, k, now), true);
+  assert.equal(closable({ ...t, column: "backlog" }, ana, k, now), true);
+  assert.equal(closable(t, { ...ana, idleAt: now - 14 * 60000 }, k, now), false);
+  assert.equal(closable(t, ana, { ...k, status: "working" }, now), false);
+  assert.equal(closable(t, ana, { ...k, labels: { "herdr.tab": "tb1" } }, now), false);
 });
 
 import { prLinksOf } from "./engine.mjs";
@@ -422,32 +434,6 @@ test("a board is forgotten only when its folder is gone long enough, unused and 
   assert.deepEqual(staleBoards(boards, [], {}, {}, now), []);
 });
 
-import { baseRef } from "./engine.mjs";
-
-test("baseRef follows a remote whose default branch moved from master to develop", async () => {
-  const tmp = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "base-"));
-  const g = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { stdio: "pipe" }).toString().trim();
-  try {
-    const origin = pathx.join(tmp, "origin.git"), seed = pathx.join(tmp, "seed"), repo = pathx.join(tmp, "repo");
-    execFileSync("git", ["init", "-q", "--bare", "-b", "master", origin]);
-    execFileSync("git", ["init", "-q", "-b", "master", seed]);
-    g(seed, "commit", "-q", "--allow-empty", "-m", "root");
-    g(seed, "remote", "add", "origin", origin);
-    g(seed, "push", "-q", "origin", "master");
-    execFileSync("git", ["clone", "-q", origin, repo]);
-    assert.equal(g(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"), "origin/master");
-    // The remote renames its default branch; this clone still remembers master.
-    g(seed, "checkout", "-q", "-b", "develop");
-    g(seed, "commit", "-q", "--allow-empty", "-m", "on develop");
-    g(seed, "push", "-q", "origin", "develop");
-    g(origin, "symbolic-ref", "HEAD", "refs/heads/develop");
-    g(seed, "push", "-q", "origin", "--delete", "master");
-    assert.equal(await baseRef(repo), "origin/develop");
-    assert.equal(g(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"), "origin/develop");
-    assert.equal(g(repo, "log", "-1", "--format=%s", "origin/develop"), "on develop");
-  } finally { fsx.rmSync(tmp, { recursive: true, force: true }); }
-});
-
 test("the task folder is trusted for Claude Code once, keeping the rest of its config", async () => {
   const { trustForClaude } = await import("./engine.mjs");
   const fsx = await import("node:fs");
@@ -470,4 +456,66 @@ test("the task folder is trusted for Claude Code once, keeping the rest of its c
     assert.equal(trustForClaude("/y", fresh), true);
     assert.deepEqual(JSON.parse(fsx.readFileSync(fresh, "utf8")), { projects: { "/y": { hasTrustDialogAccepted: true } } });
   } finally { fsx.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+import { staleRun } from "./engine.mjs";
+
+test("a run is stale when its member is not the assignee, or the task went to Backlog or To do", () => {
+  const live = { id: "r1", member: "bo" };
+  assert.equal(staleRun({ column: "doing", assignee: "bo", runs: [live] }), null);
+  assert.equal(staleRun({ column: "doing", assignee: "ana", runs: [live] }), live);
+  assert.equal(staleRun({ column: "todo", assignee: "bo", runs: [live] }), live);
+  assert.equal(staleRun({ column: "backlog", assignee: "bo", runs: [live] }), live);
+  assert.equal(staleRun({ column: "review", assignee: "bo", runs: [live] }), null);
+  assert.equal(staleRun({ column: "doing", assignee: "ana", runs: [{ ...live, ended: 1 }] }), null);
+  assert.equal(staleRun({ column: "doing", assignee: "ana", runs: [{ ...live, result: { action: "handoff" } }] }), null);
+});
+
+test("a task whose last run was stopped or reassigned is not a stranded hand-off", () => {
+  const off = { id: "r1", member: "ana", result: { action: "handoff", to: "bo" }, ended: 1 };
+  assert.equal(stranded({ column: "doing", assignee: "bo", runs: [off] }, null), true);
+  assert.equal(stranded({ column: "doing", assignee: "bo", runs: [off, { id: "r2", member: "bo", ended: 2, exit: "stopped" }] }, null), false);
+  assert.equal(stranded({ column: "doing", assignee: "bo", runs: [off, { id: "r2", member: "bo", ended: 2, exit: "parked until #5637 merges" }] }, null), false);
+  assert.equal(stranded({ column: "doing", assignee: "ana", runs: [{ id: "r2", member: "bo", ended: 2, exit: "reassigned" }] }, null), false);
+});
+
+test("an idle session of a run that ended without a result closes in any column", () => {
+  const now = 10_000_000;
+  const k = { state: "live", status: "done", labels: {} };
+  const r = { id: "r1", member: "bo", ended: now - 20 * 60000, exit: "handed to Ana for the decision gate", result: null, idleAt: now - 16 * 60000 };
+  assert.equal(closable({ column: "doing", runs: [r] }, r, k, now), true);
+  assert.equal(closable({ column: "backlog", runs: [r] }, r, k, now), true);
+  assert.equal(closable({ column: "doing", runs: [r] }, { ...r, idleAt: now - 5 * 60000 }, k, now), false);
+  assert.equal(closable({ column: "doing", runs: [r] }, r, { ...k, labels: { "herdr.tab": "tb1" } }, now), false);
+  assert.equal(closable({ column: "doing", runs: [r] }, { ...r, ended: null }, k, now), false);
+});
+
+import { holdsSlot, releasable, handoffTargets, plannerOf } from "./engine.mjs";
+
+test("a run waiting for the person's answer holds no slot", () => {
+  assert.equal(holdsSlot({ id: "r1" }), true);
+  assert.equal(holdsSlot({ id: "r1", blocked: "Which threshold?" }), false);
+  assert.equal(holdsSlot({ id: "r1", blocked: "Which threshold?", blockAnswered: true }), true);
+  assert.equal(holdsSlot(null), false);
+});
+
+test("only a blocked, idle or gone run ends on a reassign or a move; a working one goes on", () => {
+  for (const st of [null, "idle", "done", "blocked"]) assert.equal(releasable(st), true, st);
+  for (const st of ["working", "limited", "waiting"]) assert.equal(releasable(st), false, st);
+});
+
+test("every member may hand back to the Planner, besides its own hand-offs", () => {
+  const team = [
+    { id: "planner", name: "Ana", role: "Planner", handoffs: ["bo", "greg"] },
+    { id: "bo", name: "Bo", role: "Builder", handoffs: ["cy"] },
+    { id: "cy", name: "Cy", role: "Reviewer", handoffs: ["bo", "planner"] },
+    { id: "greg", name: "Greg", role: "Griller", handoffs: ["Ana", "bo"] },
+  ];
+  const names = (m) => handoffTargets(m, team).map((x) => x.name);
+  assert.equal(plannerOf(team).name, "Ana");
+  assert.deepEqual(names(team[1]), ["Cy", "Ana"]);
+  assert.deepEqual(names(team[2]), ["Bo", "Ana"]);
+  assert.deepEqual(names(team[3]), ["Ana", "Bo"]);
+  assert.deepEqual(names(team[0]), ["Bo", "Greg"]);
+  assert.deepEqual(handoffTargets(team[1], team.filter((x) => x.id !== "planner")).map((x) => x.name), ["Cy"]);
 });
